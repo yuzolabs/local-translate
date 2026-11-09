@@ -2,6 +2,7 @@ import { translateFocusedInput, watchInputs } from "../lib/input-assist";
 import { injectPageStyles, startPageTranslation } from "../lib/page-translator";
 import { closeSelectionPopup, selectionAnchor, showSelectionPopup } from "../lib/selection-popup";
 import { renderCaption, setSubtitleSession } from "../lib/subtitle-overlay";
+import { shouldStartAutoTranslate } from "../lib/site-settings";
 
 export default defineContentScript({
   matches: ["<all_urls>"],
@@ -44,7 +45,7 @@ export default defineContentScript({
       if (message.type === "caption") renderCaption(message.caption);
     });
     void chrome.runtime.sendMessage({ type: "should-auto-translate", host: location.host }).then((auto) => {
-      if (auto) startPageTranslation();
+      if (shouldStartAutoTranslate(auto)) startPageTranslation();
     });
   },
 });

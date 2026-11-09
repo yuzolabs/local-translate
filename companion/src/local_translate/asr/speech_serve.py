@@ -6,6 +6,7 @@ import asyncio
 import base64
 import json
 import time
+from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 import aiohttp
@@ -18,11 +19,12 @@ Translator = Callable[[str], Awaitable[str]]
 
 
 class SpeechServeProcess:
-    def __init__(self, binary: str, models: list[str], device: str = "cpu", threads: int = 2) -> None:
+    def __init__(self, binary: str, models: list[str], device: str = "cpu", threads: int = 2, log_path: Path | None = None) -> None:
         self.binary = binary
         self.models = models
         self.device = device
         self.threads = threads
+        self.log_path = log_path
         self.process: asyncio.subprocess.Process | None = None
         self.port: int | None = None
         self.last_used = time.monotonic()
@@ -44,12 +46,20 @@ class SpeechServeProcess:
             "--threads",
             str(self.threads),
         ]
-        self.process = await asyncio.create_subprocess_exec(
-            *argv,
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.PIPE,
-            start_new_session=True,
-        )
+        log_handle = None
+        if self.log_path:
+            self.log_path.parent.mkdir(parents=True, exist_ok=True)
+            log_handle = open(self.log_path, "ab")
+        try:
+            self.process = await asyncio.create_subprocess_exec(
+                *argv,
+                stdout=log_handle or asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.STDOUT if log_handle else asyncio.subprocess.DEVNULL,
+                start_new_session=True,
+            )
+        finally:
+            if log_handle:
+                log_handle.close()
         self.port = port
         await self._wait_healthy()
 
@@ -63,6 +73,8 @@ class SpeechServeProcess:
                     err = b""
                     if self.process.stderr:
                         err = await self.process.stderr.read()
+                    elif self.log_path and self.log_path.is_file():
+                        err = self.log_path.read_bytes()[-2000:]
                     raise CompanionError("speech_serve_exited", err.decode("utf-8", errors="replace")[:400], 500)
                 try:
                     async with session.get(url, timeout=aiohttp.ClientTimeout(total=2)) as response:

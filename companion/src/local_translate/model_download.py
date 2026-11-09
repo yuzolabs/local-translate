@@ -30,8 +30,10 @@ class ModelDownloader:
             if preset.runtime == "speech.cpp":
                 await self._speech_pull(preset.catalog_name, model_id)
             else:
-                path = await asyncio.to_thread(self._huggingface, preset.repo, preset.filename, preset.size_gb, model_id)
-                self.registry.mark_file(model_id, path, sha256_file(path))
+                path = await asyncio.to_thread(self._huggingface, preset.repo, preset.filename)
+                self._report_download_progress(model_id, path, preset.size_gb)
+                digest = await asyncio.to_thread(sha256_file, path)
+                self.registry.mark_file(model_id, path, digest)
             self.events.publish("model.download.done", model_id=model_id)
         except Exception as exc:
             self.registry.set_download_status(model_id, "error", 0.0, str(exc))
@@ -40,16 +42,19 @@ class ModelDownloader:
                 raise
             raise CompanionError("download_failed", str(exc), 500) from exc
 
-    def _huggingface(self, repo: str, filename: str, size_gb: float, model_id: str) -> Path:
+    def _huggingface(self, repo: str, filename: str) -> Path:
+        # to_thread のワーカー上では registry に触らない。書き込みがループ側の save と
+        # 重なると models.json が破損するため、進捗更新は復帰後のループ側で行う。
         os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
         from huggingface_hub import hf_hub_download
 
         local_dir = self.models_dir / repo.replace("/", "__")
         local_dir.mkdir(parents=True, exist_ok=True)
+        return Path(hf_hub_download(repo_id=repo, filename=filename, local_dir=str(local_dir)))
+
+    def _report_download_progress(self, model_id: str, path: Path, size_gb: float) -> None:
         expected = max(size_gb * 1024 * 1024 * 1024, 1)
-        path = hf_hub_download(repo_id=repo, filename=filename, local_dir=str(local_dir))
-        self.registry.set_download_status(model_id, "downloading", min(0.99, Path(path).stat().st_size / expected))
-        return Path(path)
+        self.registry.set_download_status(model_id, "downloading", min(0.99, path.stat().st_size / expected))
 
     async def _speech_pull(self, catalog_name: str, model_id: str) -> None:
         binary = await self.speech_binary_getter()
@@ -77,8 +82,10 @@ class ModelDownloader:
     async def download_custom(self, model_id: str, repo: str, filename: str) -> None:
         if not model_id or "/" in model_id:
             raise CompanionError("invalid_model_id", "モデル ID が不正です")
-        path = await asyncio.to_thread(self._huggingface, repo, filename, 0.1, model_id)
-        self.registry.mark_file(model_id, path, sha256_file(path))
+        path = await asyncio.to_thread(self._huggingface, repo, filename)
+        self._report_download_progress(model_id, path, 0.1)
+        digest = await asyncio.to_thread(sha256_file, path)
+        self.registry.mark_file(model_id, path, digest)
         self.registry.data["custom"] = [item for item in self.registry.data["custom"] if item["model_id"] != model_id]
         self.registry.data["custom"].append(
             {

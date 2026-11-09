@@ -6,17 +6,19 @@ import asyncio
 import base64
 import json
 import time
+from pathlib import Path
 from typing import Any
 
 from local_translate.errors import CompanionError
 
 
 class SpeechWorkerClient:
-    def __init__(self, binary: str, model: str, device: str = "cpu", threads: int = 2) -> None:
+    def __init__(self, binary: str, model: str, device: str = "cpu", threads: int = 2, log_path: Path | None = None) -> None:
         self.binary = binary
         self.model = model
         self.device = device
         self.threads = threads
+        self.log_path = log_path
         self.process: asyncio.subprocess.Process | None = None
         self._reader: asyncio.Task | None = None
         self._queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
@@ -26,19 +28,29 @@ class SpeechWorkerClient:
     async def start(self) -> dict[str, Any]:
         if self.process and self.process.returncode is None:
             return {"type": "ready", "reused": True}
-        self.process = await asyncio.create_subprocess_exec(
-            self.binary,
-            "worker",
-            self.model,
-            "--device",
-            self.device,
-            "--threads",
-            str(self.threads),
-            "--no-warmup",
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
+        # stderr は常時誰かが読む必要がある。PIPE のまま置くと 64KB で子が詰まるため
+        # daemon ログファイルへ流す。stdout は JSON Lines プロトコル用に PIPE を維持する。
+        log_handle = None
+        if self.log_path:
+            self.log_path.parent.mkdir(parents=True, exist_ok=True)
+            log_handle = open(self.log_path, "ab")
+        try:
+            self.process = await asyncio.create_subprocess_exec(
+                self.binary,
+                "worker",
+                self.model,
+                "--device",
+                self.device,
+                "--threads",
+                str(self.threads),
+                "--no-warmup",
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=log_handle or asyncio.subprocess.DEVNULL,
+            )
+        finally:
+            if log_handle:
+                log_handle.close()
         self._reader = asyncio.create_task(self._read_stdout())
         ready = await asyncio.wait_for(self._queue.get(), timeout=600)
         if ready.get("type") == "fatal":

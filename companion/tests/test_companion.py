@@ -1,6 +1,9 @@
 import array
+import asyncio
+import hashlib
 import json
 import sys
+import time
 from pathlib import Path
 
 import aiohttp
@@ -10,15 +13,19 @@ from aiohttp.test_utils import TestClient, TestServer
 from local_translate.asr.cer import character_error_rate
 from local_translate.asr.energy_vad import EnergyVad, pcm16_rms
 from local_translate.asr.segment_manager import SegmentManager
+from local_translate.asr.speech_serve import SpeechServeProcess
+from local_translate.asr.worker_client import SpeechWorkerClient
 from local_translate.constants import TRAINING_MAX_TOKENS
-from local_translate.daemon import AppState
+from local_translate.daemon import AppState, serve
 from local_translate.gpu_detect import GpuInfo
 from local_translate.http_api import create_app
 from local_translate.languages import LANGUAGES
-from local_translate.llama_server import LLAMA_ARGV_FLAGS, build_llama_server_argv
+from local_translate.llama_server import LLAMA_ARGV_FLAGS, build_llama_server_argv, pick_free_port
 from local_translate.nm_framing import read_native_message, write_native_message
-from local_translate.paths import AppPaths, resolve_data_dir, resolve_state_dir
+from local_translate.paths import AppPaths, default_app_paths, resolve_data_dir, resolve_state_dir
+from local_translate.process_lock import ProcessLock
 from local_translate.prompt_builder import build_pfml3_prompt
+from local_translate.runtime_fetch import RuntimeInstaller, archive_bytes_for_tests, speech_asset_name
 from local_translate.settings_store import SettingsStore, site_rule_for_host
 from local_translate.text_splitter import estimate_token_count, split_source_text
 from local_translate.vram_presets import suggest_runtime
@@ -299,3 +306,384 @@ def test_registry_rejects_a_missing_custom_file(tmp_path: Path):
     registry = ModelRegistry(tmp_path / "models.json", tmp_path / "models")
     with pytest.raises(Exception):
         registry.register_local_gguf("x", tmp_path / "missing.gguf")
+
+
+def test_register_local_gguf_uses_the_digest_given_from_a_worker_thread(tmp_path: Path, monkeypatch):
+    from local_translate.model_registry import ModelRegistry
+    from local_translate import model_registry as model_registry_module
+
+    def fail(path):
+        raise AssertionError("イベントループ上でハッシュを計算してはいけない")
+
+    monkeypatch.setattr(model_registry_module, "sha256_file", fail)
+    registry = ModelRegistry(tmp_path / "models.json", tmp_path / "models")
+    gguf = tmp_path / "a.gguf"
+    gguf.write_bytes(b"gguf")
+    record = registry.register_local_gguf("my-model", gguf, sha256="abc123")
+    assert record["sha256"] == "abc123"
+    assert registry.file_record("my-model")["sha256"] == "abc123"
+
+
+@pytest.mark.asyncio
+async def test_register_model_hashes_off_the_event_loop(tmp_path, monkeypatch):
+    import threading
+
+    import local_translate.http_api as http_api_module
+
+    paths = AppPaths.create(tmp_path / "state", tmp_path / "data")
+    state = AppState(paths)
+    state.llama = FakeLlama()
+    state.translator.llama = state.llama
+    loop_thread = threading.get_ident()
+    real_sha256_file = http_api_module.sha256_file
+    hash_threads = []
+
+    def spy(path):
+        hash_threads.append(threading.get_ident())
+        return real_sha256_file(path)
+
+    monkeypatch.setattr(http_api_module, "sha256_file", spy)
+    app = create_app(state)
+    async with TestClient(TestServer(app)) as client:
+        headers = {"Authorization": f"Bearer {state.token}"}
+        gguf = tmp_path / "custom.gguf"
+        gguf.write_bytes(b"custom-gguf")
+        response = await client.post("/v1/models", headers=headers, json={"id": "my-gguf", "path": str(gguf)})
+        assert response.status == 201
+        payload = await response.json()
+        assert payload["sha256"] == real_sha256_file(gguf)
+    assert hash_threads and all(thread != loop_thread for thread in hash_threads)
+
+
+@pytest.mark.asyncio
+async def test_model_download_hashes_off_the_event_loop(tmp_path, monkeypatch):
+    import threading
+
+    import local_translate.model_download as model_download_module
+
+    paths = AppPaths.create(tmp_path / "state", tmp_path / "data")
+    state = AppState(paths)
+    model = tmp_path / "model.gguf"
+    model.write_bytes(b"gguf")
+
+    def fake_huggingface(repo, filename):
+        del repo, filename
+        return model
+
+    state.downloader._huggingface = fake_huggingface
+    loop_thread = threading.get_ident()
+    real_sha256_file = model_download_module.sha256_file
+    hash_threads = []
+
+    def spy(path):
+        hash_threads.append(threading.get_ident())
+        return real_sha256_file(path)
+
+    monkeypatch.setattr(model_download_module, "sha256_file", spy)
+    model_id = "plamo-3-translate-0.8b-GGUF"
+    state.models.record_consent(model_id, "user-supplied")
+    await state.downloader.download(model_id)
+    assert hash_threads and all(thread != loop_thread for thread in hash_threads)
+    assert state.models.file_record(model_id)["sha256"] == real_sha256_file(model)
+
+
+def test_huggingface_worker_never_touches_the_registry(tmp_path: Path, monkeypatch):
+    import types
+
+    from local_translate.event_bus import EventBus
+    from local_translate.model_download import ModelDownloader
+    from local_translate.model_registry import ModelRegistry
+
+    models_dir = tmp_path / "models"
+    registry = ModelRegistry(tmp_path / "models.json", models_dir)
+
+    def poison(name):
+        def fail(*args, **kwargs):
+            raise AssertionError(f"ワーカー関数から registry.{name} を呼んではいけない")
+
+        return fail
+
+    for name in ("save", "set_download_status", "mark_file", "record_consent"):
+        monkeypatch.setattr(registry, name, poison(name))
+
+    target = models_dir / "dummy__repo" / "model.gguf"
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b"gguf")
+
+    def fake_hf_hub_download(**kwargs):
+        assert kwargs["local_dir"] == str(models_dir / "dummy__repo")
+        return str(target)
+
+    monkeypatch.setitem(sys.modules, "huggingface_hub", types.SimpleNamespace(hf_hub_download=fake_hf_hub_download))
+    downloader = ModelDownloader(registry, EventBus(), models_dir, lambda: None)
+    assert downloader._huggingface("dummy/repo", "model.gguf") == target
+
+
+def test_registry_save_survives_concurrent_writers(tmp_path: Path):
+    import threading
+
+    from local_translate.model_registry import ModelRegistry
+
+    path = tmp_path / "models.json"
+    registry = ModelRegistry(path, tmp_path / "models")
+    # tmp 書き込み窓を広げて旧実装の truncate/rename 競合を確実に検出するためのダミーデータ。
+    registry.data["ballast"] = "x" * 32768
+    writer_count = 8
+    rounds = 80
+    failures: list[BaseException] = []
+    start = threading.Barrier(writer_count + 1)
+
+    def writer(index: int) -> None:
+        try:
+            start.wait()
+            for step in range(rounds):
+                registry.data["downloads"][f"writer-{index}"] = {"status": "downloading", "progress": step}
+                registry.save()
+        except BaseException as exc:
+            failures.append(exc)
+
+    stop = threading.Event()
+
+    def reader() -> None:
+        start.wait()
+        probe = ModelRegistry(path, tmp_path / "models")
+        try:
+            while not stop.is_set():
+                probe.load()
+        except BaseException as exc:
+            failures.append(exc)
+
+    writers = [threading.Thread(target=writer, args=(index,)) for index in range(writer_count)]
+    probe = threading.Thread(target=reader)
+    for thread in writers:
+        thread.start()
+    probe.start()
+    for thread in writers:
+        thread.join()
+    stop.set()
+    probe.join()
+
+    assert failures == []
+    final = ModelRegistry(path, tmp_path / "models")
+    for index in range(writer_count):
+        assert final.data["downloads"][f"writer-{index}"] == {"status": "downloading", "progress": rounds - 1}
+
+
+async def start_resident_serve(tmp_path: Path, monkeypatch) -> tuple["asyncio.Task[None]", Path, dict]:
+    monkeypatch.setenv("LOCAL_TRANSLATE_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("LOCAL_TRANSLATE_DATA_DIR", str(tmp_path / "data"))
+    serve_task = asyncio.create_task(serve(port=0))
+    paths = default_app_paths()
+    info: dict | None = None
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline:
+        if paths.daemon_info_path.exists():
+            try:
+                info = json.loads(paths.daemon_info_path.read_text(encoding="utf-8"))
+                break
+            except json.JSONDecodeError:
+                pass
+        await asyncio.sleep(0.05)
+    assert isinstance(info, dict) and isinstance(info.get("port"), int)
+    return serve_task, paths, info
+
+
+@pytest.mark.asyncio
+async def test_sigterm_stops_serve_and_releases_the_lock(tmp_path, monkeypatch):
+    if sys.platform == "win32":
+        pytest.skip("Unix シグナルは Windows では使えません")
+    import os
+    import signal
+
+    serve_task, paths, _info = await start_resident_serve(tmp_path, monkeypatch)
+    lock = ProcessLock(paths.daemon_lock_path)
+    os.kill(os.getpid(), signal.SIGTERM)
+    await asyncio.wait_for(serve_task, timeout=10)
+    assert lock.acquire() is True
+    lock.release()
+
+
+@pytest.mark.asyncio
+async def test_worker_stderr_does_not_block_the_child(tmp_path: Path):
+    if sys.platform == "win32":
+        pytest.skip("Unix のスクリプト起動を前提とします")
+    script = tmp_path / "fake-worker"
+    script.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, sys\n"
+        "sys.stdout.write(json.dumps({'type': 'ready'}) + '\\n')\n"
+        "sys.stdout.flush()\n"
+        "sys.stderr.write('e' * (256 * 1024) + '\\n')\n"
+        "sys.stderr.flush()\n"
+        "for line in sys.stdin:\n"
+        "    message = json.loads(line)\n"
+        "    if message.get('type') == 'transcribe':\n"
+        "        sys.stdout.write(json.dumps({'type': 'end', 'id': message.get('id'), 'text': 'ok'}) + '\\n')\n"
+        "        sys.stdout.flush()\n",
+        encoding="utf-8",
+    )
+    script.chmod(0o755)
+    log_path = tmp_path / "daemon.log"
+    worker = SpeechWorkerClient(str(script), "fake-model", log_path=log_path)
+    try:
+        await asyncio.wait_for(worker.start(), timeout=30)
+        result = await asyncio.wait_for(worker.transcribe(b"\x00\x00" * 16, request_id="t1"), timeout=15)
+        assert result["text"] == "ok"
+    finally:
+        await worker.stop()
+    assert len(log_path.read_bytes()) >= 200 * 1024
+
+
+@pytest.mark.asyncio
+async def test_serve_stderr_does_not_block_startup(tmp_path: Path):
+    if sys.platform == "win32":
+        pytest.skip("Unix のスクリプト起動を前提とします")
+    script = tmp_path / "fake-serve"
+    script.write_text(
+        "#!/usr/bin/env python3\n"
+        "import sys\n"
+        "from http.server import BaseHTTPRequestHandler, HTTPServer\n"
+        "sys.stderr.write('e' * (256 * 1024) + '\\n')\n"
+        "sys.stderr.flush()\n"
+        "port = int(sys.argv[sys.argv.index('--port') + 1])\n"
+        "class Health(BaseHTTPRequestHandler):\n"
+        "    def do_GET(self):\n"
+        "        self.send_response(200)\n"
+        "        self.end_headers()\n"
+        "    def log_message(self, *args):\n"
+        "        pass\n"
+        "HTTPServer(('127.0.0.1', port), Health).serve_forever()\n",
+        encoding="utf-8",
+    )
+    script.chmod(0o755)
+    log_path = tmp_path / "daemon.log"
+    serve = SpeechServeProcess(str(script), ["fake-model"], log_path=log_path)
+    try:
+        await asyncio.wait_for(serve.start(pick_free_port()), timeout=30)
+    finally:
+        await serve.stop()
+    assert len(log_path.read_bytes()) >= 200 * 1024
+
+
+@pytest.mark.asyncio
+async def test_control_shutdown_stops_serve_and_releases_the_lock(tmp_path, monkeypatch):
+    serve_task, paths, info = await start_resident_serve(tmp_path, monkeypatch)
+    lock = ProcessLock(paths.daemon_lock_path)
+    assert lock.acquire() is False
+    token = paths.token_path.read_text(encoding="utf-8").strip()
+    async with aiohttp.ClientSession() as session:
+        response = await session.post(
+            f"http://127.0.0.1:{info['port']}/v1/control",
+            json={"type": "shutdown"},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert response.status == 200
+        assert (await response.json())["status"] == "stopping"
+    await asyncio.wait_for(serve_task, timeout=10)
+    assert lock.acquire() is True
+    lock.release()
+
+
+def _zip_installer(tmp_path: Path) -> RuntimeInstaller:
+    digests = tmp_path / "state" / "runtimes.sha256.json"
+    digests.parent.mkdir(parents=True, exist_ok=True)
+    return RuntimeInstaller(tmp_path / "runtimes", digests_path=digests)
+
+
+def test_runtime_install_refuses_an_archive_that_does_not_match_the_pin(tmp_path, monkeypatch):
+    from local_translate import runtime_fetch
+    from local_translate.errors import CompanionError
+
+    asset = speech_asset_name("win32", "vulkan")
+    payload = archive_bytes_for_tests(asset, "speech", b"#!/bin/sh\n")
+    monkeypatch.setitem(runtime_fetch.RUNTIME_ASSET_SHA256, asset, "0" * 64)
+    installer = _zip_installer(tmp_path)
+    installer.opener = lambda url, destination: destination.write_bytes(payload)
+    destination = installer.runtimes_dir / "speech.cpp" / "0.10.1" / "vulkan"
+    with pytest.raises(Exception) as excinfo:
+        installer.ensure_speech("vulkan", "win32")
+    assert excinfo.value.code == "checksum_mismatch"
+    assert not (destination / asset).exists()
+    assert not (destination / "speech").exists() and not (destination / "speech.exe").exists()
+
+
+def test_runtime_reuse_rechecks_the_recorded_digest(tmp_path, monkeypatch):
+    from local_translate import runtime_fetch
+    from local_translate.errors import CompanionError
+    from local_translate.constants import SPEECH_CPP_VERSION
+
+    asset = speech_asset_name("win32", "vulkan")
+    payload = archive_bytes_for_tests(asset, "speech", b"payload-v1")
+    monkeypatch.setitem(
+        runtime_fetch.RUNTIME_ASSET_SHA256,
+        asset,
+        hashlib.sha256(payload).hexdigest(),
+    )
+    installer = _zip_installer(tmp_path)
+    installer.opener = lambda url, destination: destination.write_bytes(payload)
+    binary = installer.ensure_speech("vulkan", "win32")
+    assert binary.is_file()
+    digests = json.loads(installer.digests_path.read_text(encoding="utf-8"))
+    assert digests[f"speech.cpp/{SPEECH_CPP_VERSION}/vulkan"]["binary_sha256"] == hashlib.sha256(b"payload-v1").hexdigest()
+    binary.write_bytes(b"tampered")
+    with pytest.raises(Exception) as excinfo:
+        installer.ensure_speech("vulkan", "win32")
+    assert excinfo.value.code == "runtime_binary_changed"
+    assert not binary.exists()
+
+
+def test_unpinned_runtime_records_the_first_download_and_rechecks_reinstalls(tmp_path, monkeypatch):
+    from local_translate import runtime_fetch
+    from local_translate.constants import WHISPER_CPP_VERSION
+    from local_translate.errors import CompanionError
+
+    asset = "whisper-bin-x64.zip"
+    monkeypatch.delitem(runtime_fetch.RUNTIME_ASSET_SHA256, asset, raising=False)
+    payload = archive_bytes_for_tests(asset, "whisper-cli", b"payload-v1")
+    installer = _zip_installer(tmp_path)
+    installer.opener = lambda url, destination: destination.write_bytes(payload)
+    binary = installer.ensure_whisper("win32")
+    digests = json.loads(installer.digests_path.read_text(encoding="utf-8"))
+    assert digests[f"whisper.cpp/{WHISPER_CPP_VERSION}"]["archive_sha256"] == hashlib.sha256(payload).hexdigest()
+    binary.unlink()
+    tampered = archive_bytes_for_tests(asset, "whisper-cli", b"payload-v2")
+    installer.opener = lambda url, destination: destination.write_bytes(tampered)
+    with pytest.raises(Exception) as excinfo:
+        installer.ensure_whisper("win32")
+    assert excinfo.value.code == "checksum_mismatch"
+
+
+def test_data_dir_is_private_after_ensure(tmp_path: Path):
+    if sys.platform == "win32":
+        pytest.skip("POSIX パーミッションの検証です")
+    paths = AppPaths.create(tmp_path / "state", tmp_path / "data")
+    paths.ensure()
+    assert (tmp_path / "state").stat().st_mode & 0o777 == 0o700
+    assert (tmp_path / "data").stat().st_mode & 0o777 == 0o700
+
+
+@pytest.mark.asyncio
+async def test_whisper_work_files_are_removed_even_when_transcription_fails(tmp_path: Path):
+    from local_translate.asr.whisper_backend import WhisperCppBackend
+    from local_translate.errors import CompanionError
+
+    model = tmp_path / "models" / "whisper-base.ggml"
+    model.parent.mkdir(parents=True)
+    model.write_bytes(b"ggml")
+    if sys.platform == "win32":
+        pytest.skip("Unix の bin ラッパーを前提とします")
+
+    async def work_files():
+        directory = model.parent / "whisper-work"
+        return directory / "utterance.wav", directory / "utterance.json"
+
+    ok = WhisperCppBackend("/bin/true", model)
+    text = await ok.transcribe_pcm(b"\x00\x00" * 16)
+    assert text == ""
+    wav, json_path = await work_files()
+    assert not wav.exists() and not json_path.exists()
+
+    broken = WhisperCppBackend("/bin/false", model)
+    with pytest.raises(CompanionError):
+        await broken.transcribe_pcm(b"\x00\x00" * 16)
+    assert not wav.exists() and not json_path.exists()

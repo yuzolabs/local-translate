@@ -19,6 +19,17 @@ SPEECH_CPP_REPO = "nyosegawa/speech.cpp"
 WHISPER_CPP_VERSION = "b5454"
 WHISPER_CPP_REPO = "ggml-org/whisper.cpp"
 
+# Release assets の SHA-256。llama と whisper はピン時に実ファイルをダウンロードして
+# 計算し、speech はリリース同梱の SHA256SUMS から採った。ピンがない資産は
+# 初回ダウンロード時に digest を記録し、以後の再利用・再インストールで照合する (TOFU)。
+RUNTIME_ASSET_SHA256 = {
+    f"llama-{LLAMA_CPP_VERSION}-bin-ubuntu-x64.tar.gz": "962924b5431bc1237a9e5d26ba072d37b6fe05f79b495206e7ff6134887624c5",
+    "whisper-bin-ubuntu-x64.tar.gz": "a72becf15d7917f990f6313867a52638b82b7f9ef237fb0c980dac56a135781c",
+    f"speech-{SPEECH_CPP_VERSION}-linux-x64-cpu.zip": "3396d6b2ec38c2922ff0f24a760f7b45c4ac601788f53f03eb77134393bc768b",
+    f"speech-{SPEECH_CPP_VERSION}-linux-x64-vulkan.zip": "187d639813c1836f24bcd22f518b9050f8c10bfd6af3b8198c2d8fb6122165ba",
+    f"speech-{SPEECH_CPP_VERSION}-windows-x64-vulkan.zip": "a8fe0e4b4f463c460e7ace9d38c363bec08b254cac5a7f764b7967af35d4fa1a",
+}
+
 DEFAULT_IDLE_TIMEOUT_SEC = 600
 DEFAULT_TARGET_LANG = "ja"
 DEFAULT_SOURCE_LANG = "auto"

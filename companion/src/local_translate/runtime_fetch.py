@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import io
+import json
 import os
+import shutil
 import stat
 import tarfile
 import zipfile
@@ -14,6 +16,7 @@ from urllib.request import urlopen
 from local_translate.constants import (
     LLAMA_CPP_REPO,
     LLAMA_CPP_VERSION,
+    RUNTIME_ASSET_SHA256,
     SPEECH_CPP_REPO,
     SPEECH_CPP_VERSION,
     WHISPER_CPP_REPO,
@@ -74,20 +77,6 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def verify_sha256_sums(sums_text: str, asset_name: str, file_path: Path) -> None:
-    expected = None
-    for line in sums_text.splitlines():
-        parts = line.split()
-        if len(parts) >= 2 and parts[-1].lstrip("*") == asset_name:
-            expected = parts[0]
-            break
-    if not expected:
-        raise CompanionError("checksum_missing", f"SHA256SUMS に {asset_name} がありません")
-    actual = sha256_file(file_path)
-    if actual != expected:
-        raise CompanionError("checksum_mismatch", f"{asset_name} の SHA-256 が一致しません")
-
-
 def extract_archive(archive: Path, destination: Path) -> None:
     destination.mkdir(parents=True, exist_ok=True)
     if archive.suffix == ".zip":
@@ -116,87 +105,115 @@ def mark_executable(path: Path) -> None:
 
 
 class RuntimeInstaller:
-    def __init__(self, runtimes_dir: Path, opener=download_file) -> None:
+    def __init__(self, runtimes_dir: Path, opener=download_file, digests_path: Path | None = None) -> None:
         self.runtimes_dir = runtimes_dir
         self.opener = opener
-
-    def llama_server_path(self, backend: str, platform: str | None = None) -> Path | None:
-        platform = platform or os.sys.platform
-        root = self.runtimes_dir / "llama.cpp" / LLAMA_CPP_VERSION / backend
-        return find_executable(root, "llama-server")
-
-    def speech_path(self, backend: str, platform: str | None = None) -> Path | None:
-        platform = platform or os.sys.platform
-        root = self.runtimes_dir / "speech.cpp" / SPEECH_CPP_VERSION / backend
-        return find_executable(root, "speech")
-
-    def whisper_path(self, platform: str | None = None) -> Path | None:
-        root = self.runtimes_dir / "whisper.cpp" / WHISPER_CPP_VERSION
-        found = find_executable(root, "whisper-cli")
-        return found or find_executable(root, "main")
+        self.digests_path = digests_path or (runtimes_dir / "runtimes.sha256.json")
 
     def ensure_llama(self, backend: str, platform: str | None = None) -> Path:
         platform = platform or os.sys.platform
-        existing = self.llama_server_path(backend, platform)
-        if existing:
-            return existing
+        destination = self.runtimes_dir / "llama.cpp" / LLAMA_CPP_VERSION / backend
+        key = str(destination.relative_to(self.runtimes_dir))
+        binary = self._verified_binary(key, destination, "llama-server")
+        if binary:
+            return binary
         asset = llama_asset_name(platform, backend)
         url = github_release_url(LLAMA_CPP_REPO, LLAMA_CPP_VERSION, asset)
-        return self._install(url, asset, self.runtimes_dir / "llama.cpp" / LLAMA_CPP_VERSION / backend, "llama-server")
+        return self._install(url, asset, destination, "llama-server", key)
 
     def ensure_speech(self, backend: str, platform: str | None = None) -> Path:
         platform = platform or os.sys.platform
-        existing = self.speech_path(backend, platform)
-        if existing:
-            return existing
-        asset = speech_asset_name(platform, backend)
-        tag = f"v{SPEECH_CPP_VERSION}"
-        url = github_release_url(SPEECH_CPP_REPO, tag, asset)
         destination = self.runtimes_dir / "speech.cpp" / SPEECH_CPP_VERSION / backend
-        binary = self._install(url, asset, destination, "speech")
-        sums_url = github_release_url(SPEECH_CPP_REPO, tag, "SHA256SUMS")
-        sums_path = destination / "SHA256SUMS"
-        archive = destination / asset
-        try:
-            self.opener(sums_url, sums_path)
-            verify_sha256_sums(sums_path.read_text(encoding="utf-8"), asset, archive)
-        except CompanionError:
-            raise
-        except Exception as exc:
-            raise CompanionError("checksum_unavailable", f"speech.cpp の SHA-256 を確認できません: {exc}") from exc
-        return binary
+        key = str(destination.relative_to(self.runtimes_dir))
+        binary = self._verified_binary(key, destination, "speech")
+        if binary:
+            return binary
+        asset = speech_asset_name(platform, backend)
+        url = github_release_url(SPEECH_CPP_REPO, f"v{SPEECH_CPP_VERSION}", asset)
+        return self._install(url, asset, destination, "speech", key)
 
     def ensure_whisper(self, platform: str | None = None) -> Path:
         platform = platform or os.sys.platform
-        existing = self.whisper_path(platform)
-        if existing:
-            return existing
+        root = self.runtimes_dir / "whisper.cpp" / WHISPER_CPP_VERSION
+        key = str(root.relative_to(self.runtimes_dir))
+        binary = self._verified_binary(key, root, "whisper-cli", alt_name="main")
+        if binary:
+            return binary
         asset = whisper_asset_name(platform)
         url = github_release_url(WHISPER_CPP_REPO, WHISPER_CPP_VERSION, asset)
-        root = self.runtimes_dir / "whisper.cpp" / WHISPER_CPP_VERSION
-        binary = self._install(url, asset, root, "whisper-cli")
-        if binary.name != "whisper-cli":
-            alt = find_executable(root, "main")
-            if alt:
-                return alt
+        return self._install(url, asset, root, "whisper-cli", key, alt_name="main")
+
+    def _load_records(self) -> dict[str, dict[str, str]]:
+        if not self.digests_path.is_file():
+            return {}
+        try:
+            data = json.loads(self.digests_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    def _save_record(self, key: str, destination: Path, binary: Path, asset: str, archive_sha256: str) -> None:
+        records = self._load_records()
+        records[key] = {
+            "archive": asset,
+            "archive_sha256": archive_sha256,
+            "binary": str(binary.relative_to(destination)),
+            "binary_sha256": sha256_file(binary),
+        }
+        self.digests_path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = self.digests_path.with_suffix(".json.tmp")
+        temporary.write_text(json.dumps(records, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+        temporary.replace(self.digests_path)
+
+    def _verified_binary(self, key: str, destination: Path, binary_name: str, alt_name: str | None = None) -> Path | None:
+        """Return the installed binary after checking it against the recorded digest, or None to install."""
+        binary = find_executable(destination, binary_name)
+        if binary is None and alt_name:
+            binary = find_executable(destination, alt_name)
+        if binary is None:
+            return None
+        record = self._load_records().get(key)
+        if record is None:
+            # この検査の導入前に置かれたバイナリも、初回に記録して以後の改変を検査する (TOFU)。
+            self._save_record(key, destination, binary, "", "")
+            return binary
+        if sha256_file(binary) != record.get("binary_sha256"):
+            shutil.rmtree(destination, ignore_errors=True)
+            raise CompanionError(
+                "runtime_binary_changed",
+                f"{key} のバイナリが記録した digest と一致しないため {destination} を削除しました",
+            )
         return binary
 
-    def _install(self, url: str, asset: str, destination: Path, binary_name: str) -> Path:
+    def _install(self, url: str, asset: str, destination: Path, binary_name: str, key: str, alt_name: str | None = None) -> Path:
         destination.mkdir(parents=True, exist_ok=True)
         archive = destination / asset
+        expected = RUNTIME_ASSET_SHA256.get(asset) or self._load_records().get(key, {}).get("archive_sha256") or None
         try:
             self.opener(url, archive)
+            actual = sha256_file(archive)
+        except CompanionError:
+            raise
+        except Exception as exc:
+            raise CompanionError("runtime_download_failed", f"ランタイムを取得できません: {url} ({exc})") from exc
+        # 実行前に必ず展開前のアーカイブを検証する。ピンがない資産は初回の digest を記録して
+        # 以後の再インストールで照合する (TOFU)。
+        if expected and actual != expected:
+            archive.unlink(missing_ok=True)
+            raise CompanionError("checksum_mismatch", f"{asset} の SHA-256 が一致しません")
+        try:
             extract_archive(archive, destination)
         except CompanionError:
             raise
         except Exception as exc:
             raise CompanionError("runtime_download_failed", f"ランタイムを取得できません: {url} ({exc})") from exc
         binary = find_executable(destination, binary_name)
-        if binary is None and binary_name == "whisper-cli":
-            binary = find_executable(destination, "main")
+        if binary is None and alt_name:
+            binary = find_executable(destination, alt_name)
         if binary is None:
             raise CompanionError("runtime_binary_missing", f"{binary_name} がアーカイブにありません")
         mark_executable(binary)
+        self._save_record(key, destination, binary, asset, actual)
         return binary
 
 

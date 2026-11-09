@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import signal
 import sys
 import time
 
@@ -39,13 +40,15 @@ class AppState:
         self.models = ModelRegistry(paths.registry_path, paths.models_dir)
         self.events = EventBus()
         self.gpu = detect_gpu()
-        self.installer = RuntimeInstaller(paths.runtimes_dir)
+        self.installer = RuntimeInstaller(paths.runtimes_dir, digests_path=paths.runtime_digests_path)
         self.llama = LlamaServerManager(self.installer, self.events, self.gpu, int(self.settings.data["idle_timeout_sec"]))
         self.llama.log_path = paths.daemon_log_path
         self.speech = SpeechRuntime(self.installer, self.models, self.settings, self.events, self.gpu)
+        self.speech.log_path = paths.daemon_log_path
         self.translator = TranslateService(self.llama, paths, self.settings)
         self.downloader = ModelDownloader(self.models, self.events, paths.models_dir, self.speech.ensure_speech_binary)
         self.started_at = time.time()
+        self.stop_event = asyncio.Event()
         self.subtitle_sessions = 0
         self.download_tasks: dict = {}
         self.allowed_extension_ids = _allowed_ids(paths)
@@ -75,6 +78,12 @@ async def serve(port: int = 0) -> None:
         raise SystemExit(1)
     state = AppState(paths)
     state.lock = lock
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        try:
+            loop.add_signal_handler(sig, state.stop_event.set)
+        except (NotImplementedError, RuntimeError):
+            pass  # Windows やテスト以外のループではシグナルハンドラを登録できない
     app = create_app(state)
     runner = web.AppRunner(app)
     await runner.setup()
@@ -88,8 +97,8 @@ async def serve(port: int = 0) -> None:
     )
     log.info("daemon listening on 127.0.0.1:%s", actual)
     try:
-        while True:
-            await asyncio.sleep(3600)
+        await state.stop_event.wait()
+        log.info("停止要求を受け付けました")
     finally:
         await runner.cleanup()
         lock.release()

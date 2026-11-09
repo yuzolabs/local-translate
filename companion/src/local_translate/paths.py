@@ -61,6 +61,7 @@ class AppPaths:
         (self.data_dir / "runtimes").mkdir(parents=True, exist_ok=True)
         try:
             self.state_dir.chmod(0o700)
+            self.data_dir.chmod(0o700)
         except OSError:
             pass
 
@@ -91,6 +92,10 @@ class AppPaths:
     @property
     def daemon_log_path(self) -> Path:
         return self.state_dir / "daemon.log"
+
+    @property
+    def runtime_digests_path(self) -> Path:
+        return self.state_dir / "runtimes.sha256.json"
 
     @property
     def models_dir(self) -> Path:

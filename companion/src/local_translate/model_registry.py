@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -17,6 +18,8 @@ class ModelRegistry:
         self.path = path
         self.models_dir = models_dir
         self.data: dict[str, Any] = {"consent": {}, "custom": [], "files": {}, "downloads": {}}
+        # ワーカースレッドからも save され得るため、tmp への書き込みと rename を直列化する。
+        self._save_lock = threading.Lock()
         self.load()
 
     def load(self) -> None:
@@ -27,10 +30,12 @@ class ModelRegistry:
             self.data.update(stored)
 
     def save(self) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = self.path.with_suffix(".json.tmp")
-        temporary.write_text(json.dumps(self.data, ensure_ascii=False, indent=2), encoding="utf-8")
-        temporary.replace(self.path)
+        # 同期ロックなのでイベントループ上からも安全に呼べる。
+        with self._save_lock:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            temporary = self.path.with_suffix(".json.tmp")
+            temporary.write_text(json.dumps(self.data, ensure_ascii=False, indent=2), encoding="utf-8")
+            temporary.replace(self.path)
 
     def has_consent(self, model_id: str) -> bool:
         return model_id in self.data["consent"]
@@ -70,7 +75,7 @@ class ModelRegistry:
     def download_status(self, model_id: str) -> dict[str, Any]:
         return dict(self.data["downloads"].get(model_id, {"status": "missing", "progress": 0.0}))
 
-    def register_local_gguf(self, model_id: str, path: Path, alias: str | None = None) -> dict[str, Any]:
+    def register_local_gguf(self, model_id: str, path: Path, alias: str | None = None, sha256: str | None = None) -> dict[str, Any]:
         if not model_id or "/" in model_id or model_id.startswith("-"):
             raise CompanionError("invalid_model_id", "モデル ID が不正です")
         if get_preset(model_id):
@@ -80,7 +85,9 @@ class ModelRegistry:
             raise CompanionError("invalid_model_file", "任意モデルは .gguf ファイルです")
         if not resolved.is_file():
             raise CompanionError("model_file_missing", "指定した GGUF が見つかりません", 404)
-        digest = sha256_file(resolved)
+        # 非同期呼び出し元は to_thread で計算した digest を渡す。数 GB の同步ハッシュを
+        # イベントループ上で行わないための引数。
+        digest = sha256 if sha256 is not None else sha256_file(resolved)
         record = {
             "model_id": model_id,
             "path": str(resolved),

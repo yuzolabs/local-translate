@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from pathlib import Path
 
 from local_translate.asr.speech_serve import SpeechServeProcess
 from local_translate.asr.whisper_backend import WhisperCppBackend
@@ -34,6 +35,7 @@ class SpeechRuntime:
         self.gpu = gpu
         self.worker: SpeechWorkerClient | None = None
         self.serve: SpeechServeProcess | None = None
+        self.log_path: Path | None = None
         self._lock = asyncio.Lock()
 
     def device_name(self) -> str:
@@ -76,7 +78,7 @@ class SpeechRuntime:
             if self.worker:
                 await self.worker.stop()
             binary = await self.ensure_speech_binary()
-            self.worker = SpeechWorkerClient(binary, catalog, device=self.device_name())
+            self.worker = SpeechWorkerClient(binary, catalog, device=self.device_name(), log_path=self.log_path)
             await self.worker.start()
             self.events.publish("asr.worker.ready", model=catalog)
             return self.worker
@@ -97,7 +99,7 @@ class SpeechRuntime:
             if catalog.startswith("whisper"):
                 catalog = "haas-ja-v1.0"
             port = pick_free_port()
-            self.serve = SpeechServeProcess(binary, [catalog, "silero-vad"], device=self.device_name())
+            self.serve = SpeechServeProcess(binary, [catalog, "silero-vad"], device=self.device_name(), log_path=self.log_path)
             self.events.publish("asr.serve.starting", model=catalog, port=port)
             await self.serve.start(port)
             self.events.publish("asr.serve.ready", model=catalog, port=port)
