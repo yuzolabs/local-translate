@@ -1,0 +1,35 @@
+{
+  "model": "plamo-3-translate-0.8b-GGUF",
+  "quant": "Q4_K_M",
+  "backend": "cpu",
+  "context_size": 512,
+  "cases": [
+    {
+      "surface": "api",
+      "source": "Hello.",
+      "translation": "こんにちは。",
+      "wall_seconds_including_model_load": 6.08
+    },
+    {
+      "surface": "options-ui",
+      "source": "Hello.",
+      "translation": "こんにちは。"
+    },
+    {
+      "surface": "page",
+      "source": "The meeting has been rescheduled to next Monday.",
+      "translation": "会議は来週の月曜日に延期されました。"
+    },
+    {
+      "surface": "selection",
+      "source": "Please save your changes.",
+      "translation": "変更内容を保存してください。"
+    },
+    {
+      "surface": "input",
+      "source": "Please save your changes.",
+      "translation": "変更内容を保存してください。"
+    }
+  ],
+  "generation_latency_ms_after_ready": [333, 346]
+}

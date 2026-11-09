@@ -19,6 +19,7 @@ interface TranslateJob {
 let endpoint: DaemonEndpoint | null = null;
 let nativePort: chrome.runtime.Port | null = null;
 let connectionError = "";
+let connecting: Promise<void> | null = null;
 let uiState: UiState = { connected: false, events: [] };
 const queue = new TranslationQueue(1);
 const cache = new LruTranslationCache(400, chromeStorage());
@@ -185,22 +186,24 @@ async function updateSettings(patch: Partial<Settings>): Promise<Settings> {
 }
 
 async function loadSettings(): Promise<Settings> {
-  if (endpoint) {
-    try {
-      const settings = await client().then((daemon) => daemon.getJson<Settings>("/v1/settings"));
-      await chrome.storage.local.set({ settings });
-      return settings;
-    } catch {
-      connectionError = "設定を読めません";
-    }
+  try {
+    const settings = await (await client()).getJson<Settings>("/v1/settings");
+    await chrome.storage.local.set({ settings });
+    return settings;
+  } catch (error) {
+    const stored = await chrome.storage.local.get("settings");
+    if (stored.settings) return stored.settings as Settings;
+    throw error;
   }
-  const stored = await chrome.storage.local.get("settings");
-  if (stored.settings) return stored.settings as Settings;
-  throw new Error(connectionError || "コンパニオンに接続できていません");
 }
 
 async function client(): Promise<DaemonClient> {
-  if (!endpoint) await connectNative();
+  if (!endpoint) {
+    connecting ??= connectNative().finally(() => {
+      connecting = null;
+    });
+    await connecting;
+  }
   if (!endpoint) throw new Error(connectionError || "コンパニオンに接続できていません");
   return new DaemonClient(endpoint);
 }
