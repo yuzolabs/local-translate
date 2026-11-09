@@ -61,6 +61,7 @@ class AppPaths:
         (self.data_dir / "runtimes").mkdir(parents=True, exist_ok=True)
         try:
             self.state_dir.chmod(0o700)
+            self.data_dir.chmod(0o700)
         except OSError:
             pass
 

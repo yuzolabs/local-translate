@@ -569,3 +569,39 @@ def test_unpinned_runtime_records_the_first_download_and_rechecks_reinstalls(tmp
     with pytest.raises(Exception) as excinfo:
         installer.ensure_whisper("win32")
     assert excinfo.value.code == "checksum_mismatch"
+
+
+def test_data_dir_is_private_after_ensure(tmp_path: Path):
+    if sys.platform == "win32":
+        pytest.skip("POSIX パーミッションの検証です")
+    paths = AppPaths.create(tmp_path / "state", tmp_path / "data")
+    paths.ensure()
+    assert (tmp_path / "state").stat().st_mode & 0o777 == 0o700
+    assert (tmp_path / "data").stat().st_mode & 0o777 == 0o700
+
+
+@pytest.mark.asyncio
+async def test_whisper_work_files_are_removed_even_when_transcription_fails(tmp_path: Path):
+    from local_translate.asr.whisper_backend import WhisperCppBackend
+    from local_translate.errors import CompanionError
+
+    model = tmp_path / "models" / "whisper-base.ggml"
+    model.parent.mkdir(parents=True)
+    model.write_bytes(b"ggml")
+    if sys.platform == "win32":
+        pytest.skip("Unix の bin ラッパーを前提とします")
+
+    async def work_files():
+        directory = model.parent / "whisper-work"
+        return directory / "utterance.wav", directory / "utterance.json"
+
+    ok = WhisperCppBackend("/bin/true", model)
+    text = await ok.transcribe_pcm(b"\x00\x00" * 16)
+    assert text == ""
+    wav, json_path = await work_files()
+    assert not wav.exists() and not json_path.exists()
+
+    broken = WhisperCppBackend("/bin/false", model)
+    with pytest.raises(CompanionError):
+        await broken.transcribe_pcm(b"\x00\x00" * 16)
+    assert not wav.exists() and not json_path.exists()
