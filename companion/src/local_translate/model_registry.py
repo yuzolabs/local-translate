@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -17,6 +18,8 @@ class ModelRegistry:
         self.path = path
         self.models_dir = models_dir
         self.data: dict[str, Any] = {"consent": {}, "custom": [], "files": {}, "downloads": {}}
+        # ワーカースレッドからも save され得るため、tmp への書き込みと rename を直列化する。
+        self._save_lock = threading.Lock()
         self.load()
 
     def load(self) -> None:
@@ -27,10 +30,12 @@ class ModelRegistry:
             self.data.update(stored)
 
     def save(self) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = self.path.with_suffix(".json.tmp")
-        temporary.write_text(json.dumps(self.data, ensure_ascii=False, indent=2), encoding="utf-8")
-        temporary.replace(self.path)
+        # 同期ロックなのでイベントループ上からも安全に呼べる。
+        with self._save_lock:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            temporary = self.path.with_suffix(".json.tmp")
+            temporary.write_text(json.dumps(self.data, ensure_ascii=False, indent=2), encoding="utf-8")
+            temporary.replace(self.path)
 
     def has_consent(self, model_id: str) -> bool:
         return model_id in self.data["consent"]

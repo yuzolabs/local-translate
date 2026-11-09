@@ -366,8 +366,8 @@ async def test_model_download_hashes_off_the_event_loop(tmp_path, monkeypatch):
     model = tmp_path / "model.gguf"
     model.write_bytes(b"gguf")
 
-    def fake_huggingface(repo, filename, size_gb, model_id):
-        del repo, filename, size_gb, model_id
+    def fake_huggingface(repo, filename):
+        del repo, filename
         return model
 
     state.downloader._huggingface = fake_huggingface
@@ -385,6 +385,88 @@ async def test_model_download_hashes_off_the_event_loop(tmp_path, monkeypatch):
     await state.downloader.download(model_id)
     assert hash_threads and all(thread != loop_thread for thread in hash_threads)
     assert state.models.file_record(model_id)["sha256"] == real_sha256_file(model)
+
+
+def test_huggingface_worker_never_touches_the_registry(tmp_path: Path, monkeypatch):
+    import types
+
+    from local_translate.event_bus import EventBus
+    from local_translate.model_download import ModelDownloader
+    from local_translate.model_registry import ModelRegistry
+
+    models_dir = tmp_path / "models"
+    registry = ModelRegistry(tmp_path / "models.json", models_dir)
+
+    def poison(name):
+        def fail(*args, **kwargs):
+            raise AssertionError(f"ワーカー関数から registry.{name} を呼んではいけない")
+
+        return fail
+
+    for name in ("save", "set_download_status", "mark_file", "record_consent"):
+        monkeypatch.setattr(registry, name, poison(name))
+
+    target = models_dir / "dummy__repo" / "model.gguf"
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b"gguf")
+
+    def fake_hf_hub_download(**kwargs):
+        assert kwargs["local_dir"] == str(models_dir / "dummy__repo")
+        return str(target)
+
+    monkeypatch.setitem(sys.modules, "huggingface_hub", types.SimpleNamespace(hf_hub_download=fake_hf_hub_download))
+    downloader = ModelDownloader(registry, EventBus(), models_dir, lambda: None)
+    assert downloader._huggingface("dummy/repo", "model.gguf") == target
+
+
+def test_registry_save_survives_concurrent_writers(tmp_path: Path):
+    import threading
+
+    from local_translate.model_registry import ModelRegistry
+
+    path = tmp_path / "models.json"
+    registry = ModelRegistry(path, tmp_path / "models")
+    # tmp 書き込み窓を広げて旧実装の truncate/rename 競合を確実に検出するためのダミーデータ。
+    registry.data["ballast"] = "x" * 32768
+    writer_count = 8
+    rounds = 80
+    failures: list[BaseException] = []
+    start = threading.Barrier(writer_count + 1)
+
+    def writer(index: int) -> None:
+        try:
+            start.wait()
+            for step in range(rounds):
+                registry.data["downloads"][f"writer-{index}"] = {"status": "downloading", "progress": step}
+                registry.save()
+        except BaseException as exc:
+            failures.append(exc)
+
+    stop = threading.Event()
+
+    def reader() -> None:
+        start.wait()
+        probe = ModelRegistry(path, tmp_path / "models")
+        try:
+            while not stop.is_set():
+                probe.load()
+        except BaseException as exc:
+            failures.append(exc)
+
+    writers = [threading.Thread(target=writer, args=(index,)) for index in range(writer_count)]
+    probe = threading.Thread(target=reader)
+    for thread in writers:
+        thread.start()
+    probe.start()
+    for thread in writers:
+        thread.join()
+    stop.set()
+    probe.join()
+
+    assert failures == []
+    final = ModelRegistry(path, tmp_path / "models")
+    for index in range(writer_count):
+        assert final.data["downloads"][f"writer-{index}"] == {"status": "downloading", "progress": rounds - 1}
 
 
 async def start_resident_serve(tmp_path: Path, monkeypatch) -> tuple["asyncio.Task[None]", Path, dict]:
