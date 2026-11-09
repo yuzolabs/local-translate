@@ -12,12 +12,14 @@ from aiohttp.test_utils import TestClient, TestServer
 from local_translate.asr.cer import character_error_rate
 from local_translate.asr.energy_vad import EnergyVad, pcm16_rms
 from local_translate.asr.segment_manager import SegmentManager
+from local_translate.asr.speech_serve import SpeechServeProcess
+from local_translate.asr.worker_client import SpeechWorkerClient
 from local_translate.constants import TRAINING_MAX_TOKENS
 from local_translate.daemon import AppState, serve
 from local_translate.gpu_detect import GpuInfo
 from local_translate.http_api import create_app
 from local_translate.languages import LANGUAGES
-from local_translate.llama_server import LLAMA_ARGV_FLAGS, build_llama_server_argv
+from local_translate.llama_server import LLAMA_ARGV_FLAGS, build_llama_server_argv, pick_free_port
 from local_translate.nm_framing import read_native_message, write_native_message
 from local_translate.paths import AppPaths, default_app_paths, resolve_data_dir, resolve_state_dir
 from local_translate.process_lock import ProcessLock
@@ -336,6 +338,68 @@ async def test_sigterm_stops_serve_and_releases_the_lock(tmp_path, monkeypatch):
     await asyncio.wait_for(serve_task, timeout=10)
     assert lock.acquire() is True
     lock.release()
+
+
+@pytest.mark.asyncio
+async def test_worker_stderr_does_not_block_the_child(tmp_path: Path):
+    if sys.platform == "win32":
+        pytest.skip("Unix のスクリプト起動を前提とします")
+    script = tmp_path / "fake-worker"
+    script.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, sys\n"
+        "sys.stdout.write(json.dumps({'type': 'ready'}) + '\\n')\n"
+        "sys.stdout.flush()\n"
+        "sys.stderr.write('e' * (256 * 1024) + '\\n')\n"
+        "sys.stderr.flush()\n"
+        "for line in sys.stdin:\n"
+        "    message = json.loads(line)\n"
+        "    if message.get('type') == 'transcribe':\n"
+        "        sys.stdout.write(json.dumps({'type': 'end', 'id': message.get('id'), 'text': 'ok'}) + '\\n')\n"
+        "        sys.stdout.flush()\n",
+        encoding="utf-8",
+    )
+    script.chmod(0o755)
+    log_path = tmp_path / "daemon.log"
+    worker = SpeechWorkerClient(str(script), "fake-model", log_path=log_path)
+    try:
+        await asyncio.wait_for(worker.start(), timeout=30)
+        result = await asyncio.wait_for(worker.transcribe(b"\x00\x00" * 16, request_id="t1"), timeout=15)
+        assert result["text"] == "ok"
+    finally:
+        await worker.stop()
+    assert len(log_path.read_bytes()) >= 200 * 1024
+
+
+@pytest.mark.asyncio
+async def test_serve_stderr_does_not_block_startup(tmp_path: Path):
+    if sys.platform == "win32":
+        pytest.skip("Unix のスクリプト起動を前提とします")
+    script = tmp_path / "fake-serve"
+    script.write_text(
+        "#!/usr/bin/env python3\n"
+        "import sys\n"
+        "from http.server import BaseHTTPRequestHandler, HTTPServer\n"
+        "sys.stderr.write('e' * (256 * 1024) + '\\n')\n"
+        "sys.stderr.flush()\n"
+        "port = int(sys.argv[sys.argv.index('--port') + 1])\n"
+        "class Health(BaseHTTPRequestHandler):\n"
+        "    def do_GET(self):\n"
+        "        self.send_response(200)\n"
+        "        self.end_headers()\n"
+        "    def log_message(self, *args):\n"
+        "        pass\n"
+        "HTTPServer(('127.0.0.1', port), Health).serve_forever()\n",
+        encoding="utf-8",
+    )
+    script.chmod(0o755)
+    log_path = tmp_path / "daemon.log"
+    serve = SpeechServeProcess(str(script), ["fake-model"], log_path=log_path)
+    try:
+        await asyncio.wait_for(serve.start(pick_free_port()), timeout=30)
+    finally:
+        await serve.stop()
+    assert len(log_path.read_bytes()) >= 200 * 1024
 
 
 @pytest.mark.asyncio

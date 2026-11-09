@@ -44,6 +44,7 @@ class AppState:
         self.llama = LlamaServerManager(self.installer, self.events, self.gpu, int(self.settings.data["idle_timeout_sec"]))
         self.llama.log_path = paths.daemon_log_path
         self.speech = SpeechRuntime(self.installer, self.models, self.settings, self.events, self.gpu)
+        self.speech.log_path = paths.daemon_log_path
         self.translator = TranslateService(self.llama, paths, self.settings)
         self.downloader = ModelDownloader(self.models, self.events, paths.models_dir, self.speech.ensure_speech_binary)
         self.started_at = time.time()
