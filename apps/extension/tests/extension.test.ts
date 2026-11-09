@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { TRANSLATION_LANGUAGES } from "../lib/languages";
 import { extractPageBlocks } from "../lib/page-blocks";
 import { parseSseChunk } from "../lib/sse-parser";
 import { effectiveSettings, hostShouldAutoTranslate, siteRuleForHost } from "../lib/site-settings";
@@ -32,6 +33,14 @@ const settings = {
   experimental_igpu: true,
   whisper_model: "whisper-base",
 } satisfies Settings;
+
+describe("languages", () => {
+  it("lists the 53 PLaMo languages, with simplified and traditional Chinese separate", () => {
+    expect(TRANSLATION_LANGUAGES).toHaveLength(53);
+    expect(TRANSLATION_LANGUAGES.map(([code]) => code)).toContain("zh-hans");
+    expect(TRANSLATION_LANGUAGES.map(([code]) => code)).toContain("zh-hant");
+  });
+});
 
 describe("page blocks", () => {
   it("keeps visible prose and skips scripts, hidden nodes, and our own UI", () => {

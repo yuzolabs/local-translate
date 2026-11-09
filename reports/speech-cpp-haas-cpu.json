@@ -1,0 +1,31 @@
+{
+  "speech_cpp": "0.10.1",
+  "device": "cpu",
+  "silero_vad": {
+    "fetched": true,
+    "sha256_checked_by_speech_cpp": true,
+    "input": "1 second of 16 kHz silence",
+    "regions": 0,
+    "rtfx_reported_by_speech": 276
+  },
+  "haas_ja_v1_0_q8_0": {
+    "fetched": true,
+    "sha256_checked_by_speech_cpp": true,
+    "file_gb": 0.66,
+    "worker_ready": true,
+    "worker_protocol":  "ready then transcribe end with stop=complete"
+  },
+  "haas_ja_v1_0_f16": {
+    "ran": false,
+    "reason": "F16 は 1.23 GB。この開発機では Q8_0 の worker 疎通までを確認し、F16 との CER 比較は未実施。"
+  },
+  "asr_ja_bench": {
+    "ran": false,
+    "nemo_cer_strict_reference": 0.0612,
+    "reason": "評価セットは同梱していない。local-translate-verify-asr に参照 JSONL を渡したときだけ CER を計算する。"
+  },
+  "subtitle_e2e_latency": {
+    "ran": false,
+    "reason": "タブ音声の実測は GPU 端末のチェックリスト。CPU では speech worker と silero-vad の疎通まで。"
+  }
+}

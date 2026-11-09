@@ -1,5 +1,19 @@
 import { useEffect, useState } from "preact/hooks";
+import { TRANSLATION_LANGUAGES } from "../lib/languages";
 import type { ModelRow, Settings, UiState } from "../lib/types";
+
+interface LicenseView {
+  name: string;
+  url: string;
+  summary: string;
+  fetched_text?: string | null;
+}
+
+interface CommandView {
+  name?: string;
+  description?: string;
+  shortcut?: string;
+}
 
 const empty: UiState = { connected: false, events: [] };
 
@@ -10,6 +24,8 @@ export function SettingsApp() {
   const [modelPath, setModelPath] = useState("");
   const [host, setHost] = useState("");
   const [term, setTerm] = useState({ source: "", target: "" });
+  const [commands, setCommands] = useState<CommandView[]>([]);
+  const [autoHost, setAutoHost] = useState(false);
 
   async function reload(): Promise<void> {
     const next = (await chrome.runtime.sendMessage({ type: "get-state" })) as UiState;
@@ -22,6 +38,9 @@ export function SettingsApp() {
       if (message.type === "state") setState(message.state as UiState);
     });
     void reload();
+    void chrome.runtime.sendMessage({ type: "list-commands" }).then((rows) => {
+      if (Array.isArray(rows)) setCommands(rows as CommandView[]);
+    });
     return () => port.disconnect();
   }, []);
 
@@ -70,10 +89,10 @@ export function SettingsApp() {
           <h2>翻訳</h2>
           <div class="inline">
             <label>翻訳先
-              <input value={settings.target_lang} onChange={(event) => void save({ target_lang: (event.target as HTMLInputElement).value })} />
+              <LanguageSelect value={settings.target_lang} includeAuto={false} onChange={(value) => void save({ target_lang: value })} />
             </label>
             <label>翻訳元
-              <input value={settings.source_lang} onChange={(event) => void save({ source_lang: (event.target as HTMLInputElement).value })} />
+              <LanguageSelect value={settings.source_lang} includeAuto onChange={(value) => void save({ source_lang: value })} />
             </label>
             <label>文体
               <select value={settings.form} onChange={(event) => void save({ form: (event.target as HTMLSelectElement).value as Settings["form"] })}>
@@ -172,6 +191,17 @@ export function SettingsApp() {
             <label>文字サイズ
               <input type="number" value={settings.subtitle_style.font_size_px} onChange={(event) => void save({ subtitle_style: { ...settings.subtitle_style, font_size_px: Number((event.target as HTMLInputElement).value) } })} />
             </label>
+            <label>文字色
+              <input value={settings.subtitle_style.text_color} onChange={(event) => void save({ subtitle_style: { ...settings.subtitle_style, text_color: (event.target as HTMLInputElement).value } })} />
+            </label>
+            <label>
+              <input type="checkbox" checked={settings.subtitle_style.show_original} onChange={(event) => void save({ subtitle_style: { ...settings.subtitle_style, show_original: (event.target as HTMLInputElement).checked } })} />
+              原文も表示
+            </label>
+            <label>
+              <input type="checkbox" checked={settings.translate_interim} onChange={(event) => void save({ translate_interim: (event.target as HTMLInputElement).checked })} />
+              仮確定も翻訳（既定オフ）
+            </label>
           </div>
         </section>
       )}
@@ -189,15 +219,35 @@ export function SettingsApp() {
           ))}
           <div class="inline">
             <input placeholder="example.com" value={host} onInput={(event) => setHost((event.target as HTMLInputElement).value)} />
-            <button type="button" onClick={() => void save({ site_rules: [...settings.site_rules, { host, auto_translate: false, enabled: true }] }).then(() => setHost(""))}>追加</button>
+            <label>
+              <input type="checkbox" checked={autoHost} onChange={(event) => setAutoHost((event.target as HTMLInputElement).checked)} />
+              開いたら翻訳
+            </label>
+            <button type="button" onClick={() => void save({ site_rules: [...settings.site_rules, { host, auto_translate: autoHost, enabled: true }] }).then(() => setHost(""))}>追加</button>
           </div>
         </section>
       )}
 
       <section>
+        <h2>ショートカット</h2>
+        <div class="glossary">
+          {commands.filter((command) => command.description).map((command) => (
+            <div class="inline" key={command.name}>
+              <span>{command.description}</span>
+              <span class="stamp">{command.shortcut || "未設定"}</span>
+            </div>
+          ))}
+        </div>
+        <p class="note">キーの変更は chrome://extensions/shortcuts で行います。</p>
+      </section>
+
+      <section>
         <h2>About</h2>
         <p>{state.about?.built_with ?? "Built with PLaMo"}</p>
+        <p class="note">PLaMo Community License。モデル重みは再配布せず、初回ダウンロード時に同意を取ります。</p>
+        <p class="note">Haas-ja は Apache 2.0。speech.cpp は MIT。</p>
         <p class="note">{state.about?.web_store.reason}</p>
+        <p class="note">{state.about?.windows_haas.reason}</p>
         <p class="note">{state.about?.multilingual_asr.reason}</p>
         <p class="note">経路の印: {String(port ?? "—")}</p>
       </section>
@@ -206,20 +256,56 @@ export function SettingsApp() {
 }
 
 function ModelLine({ model, onChange }: { model: ModelRow; onChange: () => void }) {
+  const [license, setLicense] = useState<LicenseView | null>(null);
+  const [licenseError, setLicenseError] = useState("");
+
+  async function showLicense(): Promise<void> {
+    setLicenseError("");
+    const response = (await chrome.runtime.sendMessage({ type: "model-license", modelId: model.id })) as LicenseView & { error?: string };
+    if (response?.error) {
+      setLicenseError(response.error);
+      return;
+    }
+    setLicense(response);
+  }
+
   return (
     <div class="model">
       <div>
         <strong>{model.id}</strong>
-        <div class="note">{model.note} / {model.status}{model.progress ? ` ${Math.round(model.progress * 100)}%` : ""}</div>
+        <div class="note">{model.note} / {model.status}{model.progress ? ` ${Math.round((model.progress ?? 0) * 100)}%` : ""}</div>
+        {license && (
+          <div class="note">
+            <div>{license.name}</div>
+            <div>{license.summary}</div>
+            {license.url && <a href={license.url} target="_blank" rel="noreferrer">{license.url}</a>}
+            {license.fetched_text && <pre class="license-text">{license.fetched_text.slice(0, 1800)}</pre>}
+          </div>
+        )}
+        {licenseError && <div class="fault">{licenseError}</div>}
       </div>
       <div class="inline">
-        {!model.consented && <button type="button" onClick={() => void chrome.runtime.sendMessage({ type: "consent", modelId: model.id }).then(onChange)}>同意する</button>}
+        {!model.consented && <button type="button" onClick={() => void showLicense()}>ライセンスを見る</button>}
+        {!model.consented && license && (
+          <button type="button" onClick={() => void chrome.runtime.sendMessage({ type: "consent", modelId: model.id }).then(onChange)}>同意して記録する</button>
+        )}
         {model.consented && model.status !== "ready" && model.status !== "running" && (
           <button type="button" onClick={() => void chrome.runtime.sendMessage({ type: "download-model", modelId: model.id }).then(onChange)}>ダウンロード</button>
         )}
         <button type="button" onClick={() => void chrome.runtime.sendMessage({ type: "activate-model", modelId: model.id }).then(onChange)}>使う</button>
       </div>
     </div>
+  );
+}
+
+function LanguageSelect({ value, includeAuto, onChange }: { value: string; includeAuto: boolean; onChange: (value: string) => void }) {
+  return (
+    <select value={value} onChange={(event) => onChange((event.target as HTMLSelectElement).value)}>
+      {includeAuto && <option value="auto">自動判別</option>}
+      {TRANSLATION_LANGUAGES.map(([code, name]) => (
+        <option key={code} value={code}>{name}</option>
+      ))}
+    </select>
   );
 }
 

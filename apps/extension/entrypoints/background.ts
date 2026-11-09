@@ -78,6 +78,10 @@ async function handleMessage(message: Record<string, unknown>, sender: chrome.ru
       return uiState;
     case "update-settings":
       return updateSettings(message.settings as Partial<Settings>);
+    case "model-license":
+      return (await client()).getJson(`/v1/models/${message.modelId}/license`);
+    case "list-commands":
+      return chrome.commands.getAll();
     case "consent":
       return (await client()).postJson(`/v1/models/${message.modelId}/consent`, { accepted: true });
     case "download-model":

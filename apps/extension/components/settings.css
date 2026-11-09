@@ -109,6 +109,15 @@ textarea { min-height: 72px; resize: vertical; }
   background: white;
   border-left: 3px solid var(--teal);
 }
+
+.license-text {
+  max-height: 140px;
+  overflow: auto;
+  white-space: pre-wrap;
+  font-size: 11px;
+  background: white;
+  padding: 6px;
+}
 @media (max-width: 520px) {
   .model { grid-template-columns: 1fr; }
 }
