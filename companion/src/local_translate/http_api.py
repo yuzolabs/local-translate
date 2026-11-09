@@ -459,10 +459,9 @@ async def on_cleanup(app: web.Application) -> None:
 
 
 async def _shutdown(state) -> None:
+    # sleep で HTTP 応答の送出を先に済ませてから serve ループへ停止を伝える。
     await asyncio.sleep(0.2)
-    await state.llama.close()
-    await state.speech.stop()
-    raise SystemExit(0)
+    state.stop_event.set()
 
 
 async def _ensure_translate_model(state, model_id: str) -> None:

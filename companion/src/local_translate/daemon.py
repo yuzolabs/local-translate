@@ -46,6 +46,7 @@ class AppState:
         self.translator = TranslateService(self.llama, paths, self.settings)
         self.downloader = ModelDownloader(self.models, self.events, paths.models_dir, self.speech.ensure_speech_binary)
         self.started_at = time.time()
+        self.stop_event = asyncio.Event()
         self.subtitle_sessions = 0
         self.download_tasks: dict = {}
         self.allowed_extension_ids = _allowed_ids(paths)
@@ -88,8 +89,8 @@ async def serve(port: int = 0) -> None:
     )
     log.info("daemon listening on 127.0.0.1:%s", actual)
     try:
-        while True:
-            await asyncio.sleep(3600)
+        await state.stop_event.wait()
+        log.info("停止要求を受け付けました")
     finally:
         await runner.cleanup()
         lock.release()

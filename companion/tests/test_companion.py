@@ -1,6 +1,8 @@
 import array
+import asyncio
 import json
 import sys
+import time
 from pathlib import Path
 
 import aiohttp
@@ -11,13 +13,14 @@ from local_translate.asr.cer import character_error_rate
 from local_translate.asr.energy_vad import EnergyVad, pcm16_rms
 from local_translate.asr.segment_manager import SegmentManager
 from local_translate.constants import TRAINING_MAX_TOKENS
-from local_translate.daemon import AppState
+from local_translate.daemon import AppState, serve
 from local_translate.gpu_detect import GpuInfo
 from local_translate.http_api import create_app
 from local_translate.languages import LANGUAGES
 from local_translate.llama_server import LLAMA_ARGV_FLAGS, build_llama_server_argv
 from local_translate.nm_framing import read_native_message, write_native_message
-from local_translate.paths import AppPaths, resolve_data_dir, resolve_state_dir
+from local_translate.paths import AppPaths, default_app_paths, resolve_data_dir, resolve_state_dir
+from local_translate.process_lock import ProcessLock
 from local_translate.prompt_builder import build_pfml3_prompt
 from local_translate.settings_store import SettingsStore, site_rule_for_host
 from local_translate.text_splitter import estimate_token_count, split_source_text
@@ -299,3 +302,41 @@ def test_registry_rejects_a_missing_custom_file(tmp_path: Path):
     registry = ModelRegistry(tmp_path / "models.json", tmp_path / "models")
     with pytest.raises(Exception):
         registry.register_local_gguf("x", tmp_path / "missing.gguf")
+
+
+async def start_resident_serve(tmp_path: Path, monkeypatch) -> tuple["asyncio.Task[None]", Path, dict]:
+    monkeypatch.setenv("LOCAL_TRANSLATE_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("LOCAL_TRANSLATE_DATA_DIR", str(tmp_path / "data"))
+    serve_task = asyncio.create_task(serve(port=0))
+    paths = default_app_paths()
+    info: dict | None = None
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline:
+        if paths.daemon_info_path.exists():
+            try:
+                info = json.loads(paths.daemon_info_path.read_text(encoding="utf-8"))
+                break
+            except json.JSONDecodeError:
+                pass
+        await asyncio.sleep(0.05)
+    assert isinstance(info, dict) and isinstance(info.get("port"), int)
+    return serve_task, paths, info
+
+
+@pytest.mark.asyncio
+async def test_control_shutdown_stops_serve_and_releases_the_lock(tmp_path, monkeypatch):
+    serve_task, paths, info = await start_resident_serve(tmp_path, monkeypatch)
+    lock = ProcessLock(paths.daemon_lock_path)
+    assert lock.acquire() is False
+    token = paths.token_path.read_text(encoding="utf-8").strip()
+    async with aiohttp.ClientSession() as session:
+        response = await session.post(
+            f"http://127.0.0.1:{info['port']}/v1/control",
+            json={"type": "shutdown"},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert response.status == 200
+        assert (await response.json())["status"] == "stopping"
+    await asyncio.wait_for(serve_task, timeout=10)
+    assert lock.acquire() is True
+    lock.release()
