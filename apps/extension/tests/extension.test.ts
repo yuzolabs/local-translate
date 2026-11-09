@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { TRANSLATION_LANGUAGES } from "../lib/languages";
 import { extractPageBlocks } from "../lib/page-blocks";
 import { parseSseChunk } from "../lib/sse-parser";
-import { effectiveSettings, hostShouldAutoTranslate, siteRuleForHost } from "../lib/site-settings";
+import { effectiveSettings, hostShouldAutoTranslate, shouldStartAutoTranslate, siteRuleForHost } from "../lib/site-settings";
 import { LruTranslationCache, translationCacheKey, type CacheStorage } from "../lib/translation-cache";
 import { TranslationQueue } from "../lib/translation-queue";
 import type { Settings } from "../lib/types";
@@ -139,6 +139,13 @@ describe("site settings", () => {
     expect(effectiveSettings(next, "blog.example.com").target_lang).toBe("en");
     expect(hostShouldAutoTranslate(next, "blog.example.com")).toBe(true);
     expect(hostShouldAutoTranslate(next, "news.example.com")).toBe(false);
+  });
+
+  it("starts auto translation only on an explicit true, never on an error object", () => {
+    expect(shouldStartAutoTranslate(true)).toBe(true);
+    expect(shouldStartAutoTranslate({ error: "コンパニオンに接続できていません" })).toBe(false);
+    expect(shouldStartAutoTranslate(undefined)).toBe(false);
+    expect(shouldStartAutoTranslate("true")).toBe(false);
   });
 });
 

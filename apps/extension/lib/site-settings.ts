@@ -27,3 +27,11 @@ export function effectiveSettings(settings: Settings, host: string): Settings {
 export function hostShouldAutoTranslate(settings: Settings, host: string): boolean {
   return siteRuleForHost(settings.site_rules, host)?.auto_translate === true;
 }
+
+/**
+ * background の should-auto-translate 応答は成功時のみ boolean になる。
+ * エラー時は { error } オブジェクトが届くため、真値比較ではなく厳密比較で判別する。
+ */
+export function shouldStartAutoTranslate(response: unknown): boolean {
+  return response === true;
+}
