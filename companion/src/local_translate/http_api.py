@@ -31,6 +31,23 @@ from local_translate.translate_service import validate_translate_request
 from local_translate.vram_presets import suggest_runtime
 
 
+def resident_memory_mb() -> int | None:
+    """Current daemon RSS in MB. /proc on Linux, ru_maxrss as the fallback."""
+    try:
+        with open("/proc/self/status", encoding="utf-8") as handle:
+            for line in handle:
+                if line.startswith("VmRSS:"):
+                    return int(int(line.split()[1]) / 1024)
+    except (OSError, ValueError, IndexError):
+        pass
+    try:
+        import resource
+
+        return int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024)
+    except (ImportError, ValueError):
+        return None
+
+
 def create_app(state) -> web.Application:
     app = web.Application(middlewares=[cors_middleware, error_middleware, auth_middleware])
     app["state"] = state
@@ -124,6 +141,7 @@ async def status(request: web.Request) -> web.Response:
         {
             "version": APP_VERSION,
             "gpu": state.gpu.to_dict(),
+            "rss_mb": resident_memory_mb(),
             "suggestion": {
                 "model_id": suggestion.model_id,
                 "context_size": suggestion.context_size,

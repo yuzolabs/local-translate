@@ -118,6 +118,14 @@ def test_state_paths_do_not_hardcode_a_user():
     assert windows == Path("C:/AppData") / "local-translate-extension" / "data"
 
 
+def test_boot_applies_the_stored_parallel_to_the_translator(tmp_path: Path):
+    paths = AppPaths.create(tmp_path / "state", tmp_path / "data")
+    paths.ensure()
+    paths.settings_path.write_text(json.dumps({"parallel": 3}), encoding="utf-8")
+    state = AppState(paths)
+    assert state.translator.parallel_slots == 3
+
+
 def test_vram_tiers():
     big = suggest_runtime(GpuInfo("cuda", "RTX", 24576, 20000, False, 32000, True, True))
     assert big.model_id == "plamo-3-translate-31b-GGUF-Q4_K_M"
@@ -225,6 +233,7 @@ async def test_http_translate_requires_token_and_streams(tmp_path: Path):
         assert status.status == 200
         body = await status.json()
         assert body["version"]
+        assert isinstance(body["rss_mb"], int) and body["rss_mb"] > 0
         origin = f"chrome-extension://{next(iter(state.allowed_extension_ids))}"
         cors = await client.get("/v1/about", headers={**headers, "Origin": origin})
         assert cors.headers["Access-Control-Allow-Origin"] == origin
