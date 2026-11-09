@@ -130,6 +130,14 @@ export function SettingsApp() {
             <ModelLine key={model.id} model={model} onChange={() => void reload()} />
           ))}
         </div>
+        {(state.events ?? []).slice(-3).map((event, index) => (
+          <p class="note" key={`${event.at ?? index}-${event.type}`}>
+            {event.type}
+            {event.model_id ? ` ${event.model_id}` : ""}
+            {typeof event.progress === "number" ? ` ${Math.round(event.progress * 100)}%` : ""}
+            {event.message ? ` — ${event.message}` : ""}
+          </p>
+        ))}
         <div class="inline">
           <input placeholder="任意 GGUF のパス" value={modelPath} onInput={(event) => setModelPath((event.target as HTMLInputElement).value)} />
           <button type="button" onClick={() => void chrome.runtime.sendMessage({ type: "register-model", id: `custom-${Date.now()}`, path: modelPath }).then(reload)}>登録する</button>

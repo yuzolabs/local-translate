@@ -21,6 +21,9 @@ let nativePort: chrome.runtime.Port | null = null;
 let connectionError = "";
 let connecting: Promise<void> | null = null;
 let uiState: UiState = { connected: false, events: [] };
+let eventsSocket: WebSocket | null = null;
+let eventsReconnect: ReturnType<typeof setTimeout> | null = null;
+let lastProgressRefreshAt = 0;
 const queue = new TranslationQueue(1);
 const cache = new LruTranslationCache(400, chromeStorage());
 const ports = new Set<chrome.runtime.Port>();
@@ -189,6 +192,7 @@ async function loadSettings(): Promise<Settings> {
   try {
     const settings = await (await client()).getJson<Settings>("/v1/settings");
     await chrome.storage.local.set({ settings });
+    queue.setConcurrency(settings.parallel ?? 1);
     return settings;
   } catch (error) {
     const stored = await chrome.storage.local.get("settings");
@@ -253,6 +257,7 @@ async function refreshUiState(): Promise<void> {
       events: uiState.events,
     };
     await chrome.storage.local.set({ settings });
+    ensureEventsSocket();
   } catch (error) {
     uiState = {
       connected: false,
@@ -261,9 +266,59 @@ async function refreshUiState(): Promise<void> {
       settings: uiState.settings,
     };
   }
+  pushUiState();
+}
+
+function pushUiState(): void {
   for (const port of ports) {
     if (port.name === "ui") port.postMessage({ type: "state", state: uiState });
   }
+}
+
+function ensureEventsSocket(): void {
+  if (!endpoint) return;
+  if (eventsSocket && (eventsSocket.readyState === WebSocket.OPEN || eventsSocket.readyState === WebSocket.CONNECTING)) {
+    return;
+  }
+  eventsSocket = null;
+  const socket = new WebSocket(`ws://127.0.0.1:${endpoint.port}/api/events`);
+  eventsSocket = socket;
+  socket.addEventListener("open", () => {
+    if (endpoint) socket.send(JSON.stringify({ type: "auth", token: endpoint.token }));
+  });
+  socket.addEventListener("message", (event) => {
+    if (typeof event.data !== "string") return;
+    try {
+      recordEvent(JSON.parse(event.data) as UiState["events"][number]);
+    } catch {
+      return;
+    }
+  });
+  socket.addEventListener("close", () => {
+    if (eventsSocket === socket) eventsSocket = null;
+    if (eventsReconnect) clearTimeout(eventsReconnect);
+    eventsReconnect = setTimeout(() => ensureEventsSocket(), 2000);
+  });
+}
+
+function recordEvent(event: UiState["events"][number]): void {
+  uiState.events = [...uiState.events, event].slice(-20);
+  const kind = String(event.type ?? "");
+  if (kind === "model.download.progress") {
+    const now = Date.now();
+    if (now - lastProgressRefreshAt < 900) {
+      pushUiState();
+      return;
+    }
+    lastProgressRefreshAt = now;
+    void refreshUiState();
+    return;
+  }
+  if (kind.startsWith("model.download") || kind.startsWith("llama.") || kind.startsWith("asr.")) {
+    void refreshUiState();
+    return;
+  }
+  pushUiState();
 }
 
 async function startSubtitles(senderTabId?: number): Promise<{ ok: true }> {
