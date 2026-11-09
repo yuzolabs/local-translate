@@ -18,17 +18,23 @@
 
 拡張は Native Messaging で `port` と `token` を受け取り、以後は `127.0.0.1` の HTTP と WebSocket で通信します。HTTP リクエストには `Authorization: Bearer` を付けます。ブラウザの WebSocket は最初のテキストフレーム `{"type":"auth","token":"..."}` でも認証を受け付けます。
 
+拡張は daemon の `WS /api/events` を購読し、モデル DL 進捗・`llama-server` の起動/停止・エラーを設定 UI へ反映します。進捗イベントは約 1 秒間隔で表示を更新します。
+
 ### 翻訳モデル
 
 翻訳モデルは `llama.cpp`（ピンは `b12211`）の `llama-server` を子プロセス起動します。PLaMo は公式の PFML3 を Completions API に渡し、任意の GGUF は汎用の翻訳指示を使います。
 
-アイドル 10 分で `llama-server` を止めます。既定の翻訳先は日本語で、文体は `polite` と `plain` です。用語集とサイト別設定はグローバル設定に含まれます。
+アイドル 10 分で `llama-server` を止めます。既定の翻訳先は日本語で、文体は `polite` と `plain` です。用語集とサイト別設定はグローバル設定に含まれます。daemon は起動時に保存済みの `parallel` 設定を翻訳セマフォへ反映します。
+
+Hugging Face からの GGUF ダウンロードは、公開 LFS ポインターの SHA-256 と照合してから採用します。ダウンロード中は 0.5 秒間隔で `model.download.progress` イベントを通知します。`speech.cpp` カタログは従来どおり `speech pull` の SHA-256 検証を使います。
 
 ### 音声認識モデル
 
 ASR の既定は `speech.cpp` `0.10.1` の `haas-ja-v1.0` です。字幕の本番経路は `speech serve` に `haas-ja-v1.0` と `silero-vad` を載せて Realtime の `server_vad` を使います。`segment-worker` 経路も実装してあります。
 
 多言語の音声認識は `whisper.cpp` `b5454` の `ggml-large-v3-turbo` と `ggml-base` で、代替は `speech.cpp` の `qwen3-asr-0.6b` です。
+
+字幕翻訳は直前の確定セグメント（最大 2 件）を文脈としてプロンプトへ渡します。字幕開始時に字幕スタイル（位置・文字サイズ・文字色・原文表示）がオーバーレイへ渡り、設定を変更すると表示中のオーバーレイへ即時反映されます。
 
 ### 状態とデータの保存先
 
@@ -84,6 +90,8 @@ cd companion && uv run python ../scripts/smoke_translate.py
 
 テストは `companion` で `uv run pytest`、拡張で `bun run test`、拡張 UI は `bunx playwright test` です。安定版 Chrome が `--load-extension` を無視するため、Playwright は CDP の `Extensions.loadUnpacked` で拡張を読み込みます。`DISPLAY` がないときはテストが `Xvfb` を起動します。
 
+Playwright の options ページテストは既定でモック daemon（`apps/extension/e2e/mock-daemon.mjs` と `apps/extension/e2e/nm-mock-host.py`）を使い、モデル一覧・ライセンス同意・翻訳表示まで確認します。実体なしの従来モードは `LT_E2E_DAEMON=real bunx playwright test` で実行します。
+
 ```bash
 cd companion && uv run pytest
 cd apps/extension && bun run test
@@ -99,6 +107,8 @@ cd apps/extension && bunx playwright test
 拡張のコンテンツスクリプト経由でも、ページ全体は `"The meeting has been rescheduled to next Monday."` が「会議は来週の月曜日に延期されました。」、選択範囲と入力欄は `"Please save your changes."` が「変更内容を保存してください。」となることを確認しました。記録は `reports/translation-0.8b-cpu.json` です。
 
 `speech.cpp` `0.10.1` の CPU ビルドは起動し、`silero-vad` は 1 秒の無音で区間 0、`haas-ja-v1.0` の `Q8_0` は worker が `ready` になり文字起こし要求が完了しました。実音声の品質、`F16` との比較、`asr-ja-bench` の CER、字幕の E2E レイテンシは未測定です。記録は `reports/speech-cpp-haas-cpu.json` です。
+
+daemon アイドル時の常駐メモリを実測しました。`GET /v1/status` の `rss_mb` で確認でき、記録は `reports/companion-memory.json` です（38 MB、バージョン 0.1.0、`llama-server` と `speech.cpp` 未起動、CPU 4 コア + Intel 内蔵 GPU + RAM 7.5GB の開発機）。
 
 ### 未実施の項目
 
