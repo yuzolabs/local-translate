@@ -40,7 +40,7 @@ class AppState:
         self.models = ModelRegistry(paths.registry_path, paths.models_dir)
         self.events = EventBus()
         self.gpu = detect_gpu()
-        self.installer = RuntimeInstaller(paths.runtimes_dir)
+        self.installer = RuntimeInstaller(paths.runtimes_dir, digests_path=paths.runtime_digests_path)
         self.llama = LlamaServerManager(self.installer, self.events, self.gpu, int(self.settings.data["idle_timeout_sec"]))
         self.llama.log_path = paths.daemon_log_path
         self.speech = SpeechRuntime(self.installer, self.models, self.settings, self.events, self.gpu)

@@ -93,6 +93,10 @@ class AppPaths:
         return self.state_dir / "daemon.log"
 
     @property
+    def runtime_digests_path(self) -> Path:
+        return self.state_dir / "runtimes.sha256.json"
+
+    @property
     def models_dir(self) -> Path:
         return self.data_dir / "models"
 

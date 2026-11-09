@@ -1,5 +1,6 @@
 import array
 import asyncio
+import hashlib
 import json
 import sys
 import time
@@ -24,6 +25,7 @@ from local_translate.nm_framing import read_native_message, write_native_message
 from local_translate.paths import AppPaths, default_app_paths, resolve_data_dir, resolve_state_dir
 from local_translate.process_lock import ProcessLock
 from local_translate.prompt_builder import build_pfml3_prompt
+from local_translate.runtime_fetch import RuntimeInstaller, archive_bytes_for_tests, speech_asset_name
 from local_translate.settings_store import SettingsStore, site_rule_for_host
 from local_translate.text_splitter import estimate_token_count, split_source_text
 from local_translate.vram_presets import suggest_runtime
@@ -498,3 +500,72 @@ async def test_control_shutdown_stops_serve_and_releases_the_lock(tmp_path, monk
     await asyncio.wait_for(serve_task, timeout=10)
     assert lock.acquire() is True
     lock.release()
+
+
+def _zip_installer(tmp_path: Path) -> RuntimeInstaller:
+    digests = tmp_path / "state" / "runtimes.sha256.json"
+    digests.parent.mkdir(parents=True, exist_ok=True)
+    return RuntimeInstaller(tmp_path / "runtimes", digests_path=digests)
+
+
+def test_runtime_install_refuses_an_archive_that_does_not_match_the_pin(tmp_path, monkeypatch):
+    from local_translate import runtime_fetch
+    from local_translate.errors import CompanionError
+
+    asset = speech_asset_name("win32", "vulkan")
+    payload = archive_bytes_for_tests(asset, "speech", b"#!/bin/sh\n")
+    monkeypatch.setitem(runtime_fetch.RUNTIME_ASSET_SHA256, asset, "0" * 64)
+    installer = _zip_installer(tmp_path)
+    installer.opener = lambda url, destination: destination.write_bytes(payload)
+    destination = installer.runtimes_dir / "speech.cpp" / "0.10.1" / "vulkan"
+    with pytest.raises(Exception) as excinfo:
+        installer.ensure_speech("vulkan", "win32")
+    assert excinfo.value.code == "checksum_mismatch"
+    assert not (destination / asset).exists()
+    assert not (destination / "speech").exists() and not (destination / "speech.exe").exists()
+
+
+def test_runtime_reuse_rechecks_the_recorded_digest(tmp_path, monkeypatch):
+    from local_translate import runtime_fetch
+    from local_translate.errors import CompanionError
+    from local_translate.constants import SPEECH_CPP_VERSION
+
+    asset = speech_asset_name("win32", "vulkan")
+    payload = archive_bytes_for_tests(asset, "speech", b"payload-v1")
+    monkeypatch.setitem(
+        runtime_fetch.RUNTIME_ASSET_SHA256,
+        asset,
+        hashlib.sha256(payload).hexdigest(),
+    )
+    installer = _zip_installer(tmp_path)
+    installer.opener = lambda url, destination: destination.write_bytes(payload)
+    binary = installer.ensure_speech("vulkan", "win32")
+    assert binary.is_file()
+    digests = json.loads(installer.digests_path.read_text(encoding="utf-8"))
+    assert digests[f"speech.cpp/{SPEECH_CPP_VERSION}/vulkan"]["binary_sha256"] == hashlib.sha256(b"payload-v1").hexdigest()
+    binary.write_bytes(b"tampered")
+    with pytest.raises(Exception) as excinfo:
+        installer.ensure_speech("vulkan", "win32")
+    assert excinfo.value.code == "runtime_binary_changed"
+    assert not binary.exists()
+
+
+def test_unpinned_runtime_records_the_first_download_and_rechecks_reinstalls(tmp_path, monkeypatch):
+    from local_translate import runtime_fetch
+    from local_translate.constants import WHISPER_CPP_VERSION
+    from local_translate.errors import CompanionError
+
+    asset = "whisper-bin-x64.zip"
+    monkeypatch.delitem(runtime_fetch.RUNTIME_ASSET_SHA256, asset, raising=False)
+    payload = archive_bytes_for_tests(asset, "whisper-cli", b"payload-v1")
+    installer = _zip_installer(tmp_path)
+    installer.opener = lambda url, destination: destination.write_bytes(payload)
+    binary = installer.ensure_whisper("win32")
+    digests = json.loads(installer.digests_path.read_text(encoding="utf-8"))
+    assert digests[f"whisper.cpp/{WHISPER_CPP_VERSION}"]["archive_sha256"] == hashlib.sha256(payload).hexdigest()
+    binary.unlink()
+    tampered = archive_bytes_for_tests(asset, "whisper-cli", b"payload-v2")
+    installer.opener = lambda url, destination: destination.write_bytes(tampered)
+    with pytest.raises(Exception) as excinfo:
+        installer.ensure_whisper("win32")
+    assert excinfo.value.code == "checksum_mismatch"
