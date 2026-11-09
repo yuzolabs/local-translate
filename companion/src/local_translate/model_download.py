@@ -31,7 +31,8 @@ class ModelDownloader:
                 await self._speech_pull(preset.catalog_name, model_id)
             else:
                 path = await asyncio.to_thread(self._huggingface, preset.repo, preset.filename, preset.size_gb, model_id)
-                self.registry.mark_file(model_id, path, sha256_file(path))
+                digest = await asyncio.to_thread(sha256_file, path)
+                self.registry.mark_file(model_id, path, digest)
             self.events.publish("model.download.done", model_id=model_id)
         except Exception as exc:
             self.registry.set_download_status(model_id, "error", 0.0, str(exc))
@@ -78,7 +79,8 @@ class ModelDownloader:
         if not model_id or "/" in model_id:
             raise CompanionError("invalid_model_id", "モデル ID が不正です")
         path = await asyncio.to_thread(self._huggingface, repo, filename, 0.1, model_id)
-        self.registry.mark_file(model_id, path, sha256_file(path))
+        digest = await asyncio.to_thread(sha256_file, path)
+        self.registry.mark_file(model_id, path, digest)
         self.registry.data["custom"] = [item for item in self.registry.data["custom"] if item["model_id"] != model_id]
         self.registry.data["custom"].append(
             {

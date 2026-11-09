@@ -306,6 +306,85 @@ def test_registry_rejects_a_missing_custom_file(tmp_path: Path):
         registry.register_local_gguf("x", tmp_path / "missing.gguf")
 
 
+def test_register_local_gguf_uses_the_digest_given_from_a_worker_thread(tmp_path: Path, monkeypatch):
+    from local_translate.model_registry import ModelRegistry
+    from local_translate import model_registry as model_registry_module
+
+    def fail(path):
+        raise AssertionError("イベントループ上でハッシュを計算してはいけない")
+
+    monkeypatch.setattr(model_registry_module, "sha256_file", fail)
+    registry = ModelRegistry(tmp_path / "models.json", tmp_path / "models")
+    gguf = tmp_path / "a.gguf"
+    gguf.write_bytes(b"gguf")
+    record = registry.register_local_gguf("my-model", gguf, sha256="abc123")
+    assert record["sha256"] == "abc123"
+    assert registry.file_record("my-model")["sha256"] == "abc123"
+
+
+@pytest.mark.asyncio
+async def test_register_model_hashes_off_the_event_loop(tmp_path, monkeypatch):
+    import threading
+
+    import local_translate.http_api as http_api_module
+
+    paths = AppPaths.create(tmp_path / "state", tmp_path / "data")
+    state = AppState(paths)
+    state.llama = FakeLlama()
+    state.translator.llama = state.llama
+    loop_thread = threading.get_ident()
+    real_sha256_file = http_api_module.sha256_file
+    hash_threads = []
+
+    def spy(path):
+        hash_threads.append(threading.get_ident())
+        return real_sha256_file(path)
+
+    monkeypatch.setattr(http_api_module, "sha256_file", spy)
+    app = create_app(state)
+    async with TestClient(TestServer(app)) as client:
+        headers = {"Authorization": f"Bearer {state.token}"}
+        gguf = tmp_path / "custom.gguf"
+        gguf.write_bytes(b"custom-gguf")
+        response = await client.post("/v1/models", headers=headers, json={"id": "my-gguf", "path": str(gguf)})
+        assert response.status == 201
+        payload = await response.json()
+        assert payload["sha256"] == real_sha256_file(gguf)
+    assert hash_threads and all(thread != loop_thread for thread in hash_threads)
+
+
+@pytest.mark.asyncio
+async def test_model_download_hashes_off_the_event_loop(tmp_path, monkeypatch):
+    import threading
+
+    import local_translate.model_download as model_download_module
+
+    paths = AppPaths.create(tmp_path / "state", tmp_path / "data")
+    state = AppState(paths)
+    model = tmp_path / "model.gguf"
+    model.write_bytes(b"gguf")
+
+    def fake_huggingface(repo, filename, size_gb, model_id):
+        del repo, filename, size_gb, model_id
+        return model
+
+    state.downloader._huggingface = fake_huggingface
+    loop_thread = threading.get_ident()
+    real_sha256_file = model_download_module.sha256_file
+    hash_threads = []
+
+    def spy(path):
+        hash_threads.append(threading.get_ident())
+        return real_sha256_file(path)
+
+    monkeypatch.setattr(model_download_module, "sha256_file", spy)
+    model_id = "plamo-3-translate-0.8b-GGUF"
+    state.models.record_consent(model_id, "user-supplied")
+    await state.downloader.download(model_id)
+    assert hash_threads and all(thread != loop_thread for thread in hash_threads)
+    assert state.models.file_record(model_id)["sha256"] == real_sha256_file(model)
+
+
 async def start_resident_serve(tmp_path: Path, monkeypatch) -> tuple["asyncio.Task[None]", Path, dict]:
     monkeypatch.setenv("LOCAL_TRANSLATE_STATE_DIR", str(tmp_path / "state"))
     monkeypatch.setenv("LOCAL_TRANSLATE_DATA_DIR", str(tmp_path / "data"))

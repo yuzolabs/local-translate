@@ -25,6 +25,7 @@ from local_translate.constants import (
 from local_translate.errors import CompanionError
 from local_translate.languages import LANGUAGES
 from local_translate.license_texts import LICENSES
+from local_translate.model_registry import sha256_file
 from local_translate.presets import get_preset
 from local_translate.translate_service import validate_translate_request
 from local_translate.vram_presets import suggest_runtime
@@ -250,7 +251,11 @@ async def register_model(request: web.Request) -> web.Response:
     if body.get("path"):
         from pathlib import Path
 
-        record = state.models.register_local_gguf(model_id, Path(str(body["path"])), body.get("alias"))
+        resolved = Path(str(body["path"])).expanduser().resolve()
+        digest = None
+        if resolved.is_file() and resolved.suffix.lower() == ".gguf":
+            digest = await asyncio.to_thread(sha256_file, resolved)
+        record = state.models.register_local_gguf(model_id, resolved, body.get("alias"), sha256=digest)
         return web.json_response(record, status=201)
     if body.get("repo") and body.get("filename"):
         if body.get("consent") is not True:

@@ -70,7 +70,7 @@ class ModelRegistry:
     def download_status(self, model_id: str) -> dict[str, Any]:
         return dict(self.data["downloads"].get(model_id, {"status": "missing", "progress": 0.0}))
 
-    def register_local_gguf(self, model_id: str, path: Path, alias: str | None = None) -> dict[str, Any]:
+    def register_local_gguf(self, model_id: str, path: Path, alias: str | None = None, sha256: str | None = None) -> dict[str, Any]:
         if not model_id or "/" in model_id or model_id.startswith("-"):
             raise CompanionError("invalid_model_id", "モデル ID が不正です")
         if get_preset(model_id):
@@ -80,7 +80,9 @@ class ModelRegistry:
             raise CompanionError("invalid_model_file", "任意モデルは .gguf ファイルです")
         if not resolved.is_file():
             raise CompanionError("model_file_missing", "指定した GGUF が見つかりません", 404)
-        digest = sha256_file(resolved)
+        # 非同期呼び出し元は to_thread で計算した digest を渡す。数 GB の同步ハッシュを
+        # イベントループ上で行わないための引数。
+        digest = sha256 if sha256 is not None else sha256_file(resolved)
         record = {
             "model_id": model_id,
             "path": str(resolved),
