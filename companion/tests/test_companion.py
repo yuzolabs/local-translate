@@ -324,6 +324,21 @@ async def start_resident_serve(tmp_path: Path, monkeypatch) -> tuple["asyncio.Ta
 
 
 @pytest.mark.asyncio
+async def test_sigterm_stops_serve_and_releases_the_lock(tmp_path, monkeypatch):
+    if sys.platform == "win32":
+        pytest.skip("Unix シグナルは Windows では使えません")
+    import os
+    import signal
+
+    serve_task, paths, _info = await start_resident_serve(tmp_path, monkeypatch)
+    lock = ProcessLock(paths.daemon_lock_path)
+    os.kill(os.getpid(), signal.SIGTERM)
+    await asyncio.wait_for(serve_task, timeout=10)
+    assert lock.acquire() is True
+    lock.release()
+
+
+@pytest.mark.asyncio
 async def test_control_shutdown_stops_serve_and_releases_the_lock(tmp_path, monkeypatch):
     serve_task, paths, info = await start_resident_serve(tmp_path, monkeypatch)
     lock = ProcessLock(paths.daemon_lock_path)

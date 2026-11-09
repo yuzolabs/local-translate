@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import signal
 import sys
 import time
 
@@ -76,6 +77,12 @@ async def serve(port: int = 0) -> None:
         raise SystemExit(1)
     state = AppState(paths)
     state.lock = lock
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        try:
+            loop.add_signal_handler(sig, state.stop_event.set)
+        except (NotImplementedError, RuntimeError):
+            pass  # Windows やテスト以外のループではシグナルハンドラを登録できない
     app = create_app(state)
     runner = web.AppRunner(app)
     await runner.setup()
