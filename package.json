@@ -1,0 +1,10 @@
+{
+  "name": "local-translate-extension",
+  "private": true,
+  "workspaces": ["apps/extension"],
+  "scripts": {
+    "test": "bun --cwd apps/extension run test",
+    "build": "bun --cwd apps/extension run build",
+    "zip": "bun --cwd apps/extension run zip"
+  }
+}

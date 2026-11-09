@@ -1,0 +1,114 @@
+:root {
+  color-scheme: light;
+  --booth: #17242c;
+  --paper: #e6efe9;
+  --ink: #142028;
+  --teal: #1f6f6a;
+  --amber: #d0892f;
+  --fault: #b64040;
+  --line: #c5d5ce;
+  font-family: "Hiragino Sans", "Noto Sans CJK JP", "Source Han Sans JP", sans-serif;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--paper);
+  color: var(--ink);
+}
+
+button, input, select, textarea {
+  font: inherit;
+  color: inherit;
+}
+
+button {
+  background: transparent;
+  border: 1px solid var(--teal);
+  border-radius: 999px;
+  padding: 4px 10px;
+  cursor: pointer;
+}
+
+button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible {
+  outline: 2px solid var(--amber);
+  outline-offset: 2px;
+}
+
+.app {
+  display: grid;
+  gap: 14px;
+  padding: 16px;
+}
+
+.signal {
+  background: var(--booth);
+  color: #e7f0ec;
+  border-radius: 14px;
+  padding: 12px 14px;
+}
+
+.signal-path {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-variant-numeric: tabular-nums;
+}
+
+.stamp {
+  margin-left: auto;
+  border: 1px dashed var(--amber);
+  color: var(--amber);
+  padding: 2px 6px;
+  font-family: ui-monospace, monospace;
+  font-size: 12px;
+}
+
+.dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--fault);
+}
+
+.dot.live { background: #7dcea0; }
+
+section {
+  border-top: 1px solid var(--line);
+  padding-top: 12px;
+}
+
+h1, h2 { margin: 0 0 8px; font-weight: 620; }
+h1 { font-size: 20px; }
+h2 { font-size: 15px; color: var(--teal); }
+
+.row, .glossary, .models { display: grid; gap: 8px; }
+.inline { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+label { display: grid; gap: 4px; font-size: 13px; }
+input, select, textarea {
+  border: 1px solid var(--line);
+  background: white;
+  border-radius: 8px;
+  padding: 6px 8px;
+}
+textarea { min-height: 72px; resize: vertical; }
+.model {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 6px;
+  align-items: center;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--line);
+}
+.note { color: #4d625e; font-size: 12px; }
+.fault { color: var(--fault); }
+.preview {
+  min-height: 1.4em;
+  padding: 8px;
+  background: white;
+  border-left: 3px solid var(--teal);
+}
+@media (max-width: 520px) {
+  .model { grid-template-columns: 1fr; }
+}
