@@ -341,6 +341,7 @@ async def subtitles(request: web.Request) -> web.WebSocketResponse:
     state.subtitle_sessions += 1
     pcm_queue: asyncio.Queue[bytes | None] = asyncio.Queue()
     backend = state.settings.data["subtitle_backend"]
+    runner: asyncio.Task | None = None
     try:
         if backend == "speech-serve":
             serve = await state.speech.ensure_serve()
@@ -362,9 +363,13 @@ async def subtitles(request: web.Request) -> web.WebSocketResponse:
                     break
             elif message.type in {WSMsgType.CLOSE, WSMsgType.ERROR}:
                 break
-        await pcm_queue.put(None)
-        runner.cancel()
     finally:
+        await pcm_queue.put(None)
+        if runner is not None:
+            try:
+                await runner
+            except Exception:
+                runner.cancel()
         state.subtitle_sessions = max(0, state.subtitle_sessions - 1)
     return socket
 

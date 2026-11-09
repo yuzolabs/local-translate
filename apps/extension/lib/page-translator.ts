@@ -5,13 +5,13 @@ const translated = new Set<string>();
 
 export function startPageTranslation(): void {
   const blocks = extractPageBlocks(document);
-  const visible = new Set<string>();
+  const queued = new Set<string>();
+  const byId = new Map(blocks.map((block) => [block.id, block]));
   const observer = new IntersectionObserver((entries) => {
     for (const entry of entries) {
       const id = (entry.target as HTMLElement).dataset.ltBlockId;
-      if (!id) continue;
-      if (entry.isIntersecting) visible.add(id);
-      else visible.delete(id);
+      if (!id || !entry.isIntersecting) continue;
+      queueBlock(byId.get(id), true, queued);
     }
   });
   for (const block of blocks) {
@@ -21,11 +21,15 @@ export function startPageTranslation(): void {
     observer.observe(element);
     insertPlaceholder(element, block.id);
   }
-  const pending = blocks.filter((block) => !translated.has(block.id));
-  pending.sort((left, right) => Number(visible.has(right.id)) - Number(visible.has(left.id)) || right.score - left.score);
-  for (const block of pending) {
-    void translateBlock(block, visible.has(block.id));
-  }
+  window.setTimeout(() => {
+    for (const block of blocks) queueBlock(block, false, queued);
+  }, 300);
+}
+
+function queueBlock(block: PageBlock | undefined, visible: boolean, queued: Set<string>): void {
+  if (!block || queued.has(block.id) || translated.has(block.id)) return;
+  queued.add(block.id);
+  void translateBlock(block, visible);
 }
 
 function findBlockElement(block: PageBlock): HTMLElement | null {

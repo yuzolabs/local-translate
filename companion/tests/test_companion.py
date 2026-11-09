@@ -3,6 +3,7 @@ import json
 import sys
 from pathlib import Path
 
+import aiohttp
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
@@ -252,6 +253,44 @@ async def test_http_translate_requires_token_and_streams(tmp_path: Path):
         streamed = await client.post("/api/translate", headers=headers, json={"text": "Hello", "target_lang": "ja"})
         raw = await streamed.text()
         assert "event: delta" in raw and "訳文" in raw
+
+
+@pytest.mark.asyncio
+async def test_subtitle_socket_emits_final_caption(tmp_path: Path):
+    paths = AppPaths.create(tmp_path / "state", tmp_path / "data")
+    state = AppState(paths)
+    state.llama = FakeLlama()
+    state.translator.llama = state.llama
+    model = tmp_path / "model.gguf"
+    model.write_bytes(b"gguf")
+    state.models.mark_file("plamo-3-translate-0.8b-GGUF", model)
+    state.settings.update({"subtitle_backend": "segment-worker", "translate_interim": False})
+
+    async def transcribe_pcm(pcm: bytes, sample_rate: int = 16000) -> str:
+        del pcm, sample_rate
+        return "会議です"
+
+    state.speech.transcribe_pcm = transcribe_pcm
+    app = create_app(state)
+    async with TestClient(TestServer(app)) as client:
+        async with client.ws_connect("/api/subtitles") as socket:
+            await socket.send_json({"type": "auth", "token": state.token})
+            await socket.send_bytes(pcm_tone(16000, 2000))
+            await socket.send_bytes(pcm_tone(16000, 0))
+            await socket.send_json({"type": "stop"})
+            captions = []
+            while True:
+                message = await socket.receive(timeout=5)
+                if message.type is not aiohttp.WSMsgType.TEXT:
+                    break
+                captions.append(message.json())
+                if captions[-1].get("final"):
+                    break
+    finals = [caption for caption in captions if caption.get("final")]
+    assert finals
+    assert finals[-1]["text"] == "会議です"
+    assert finals[-1]["translation"] == "訳文"
+    assert {"seq", "start_ms", "end_ms", "text", "translation", "final"} <= finals[-1].keys()
 
 
 def test_registry_rejects_a_missing_custom_file(tmp_path: Path):
