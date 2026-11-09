@@ -26,6 +26,11 @@ export function setSubtitleSession(next: boolean, nextStyle?: SubtitleStyle): vo
   trackVideo();
 }
 
+export function applySubtitleStyle(next: SubtitleStyle): void {
+  style = next;
+  if (active && host) paint();
+}
+
 export function renderCaption(caption: Caption): void {
   if (!active) setSubtitleSession(true);
   if (!caption.final) {
@@ -51,6 +56,7 @@ function ensureHost(): void {
 }
 
 function trackVideo(): void {
+  if (typeof requestAnimationFrame !== "function") return;
   const tick = () => {
     if (!active || !host) return;
     const video = pickVideo();

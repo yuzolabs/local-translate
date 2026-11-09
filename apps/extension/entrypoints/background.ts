@@ -184,6 +184,12 @@ async function updateSettings(patch: Partial<Settings>): Promise<Settings> {
   const settings = await daemon.postJson<Settings>("/v1/settings", patch);
   await chrome.storage.local.set({ settings });
   queue.setConcurrency(settings.parallel ?? 1);
+  if (patch.subtitle_style) {
+    const tabId = await subtitleTargetTabId();
+    if (tabId) {
+      await chrome.tabs.sendMessage(tabId, { type: "subtitle-style", style: settings.subtitle_style }).catch(() => undefined);
+    }
+  }
   await refreshUiState();
   return settings;
 }
@@ -337,22 +343,37 @@ async function startSubtitles(senderTabId?: number): Promise<{ ok: true }> {
     tabId: tab.id,
   });
   void daemon;
-  await chrome.tabs.sendMessage(tab.id, { type: "subtitle-session", active: true });
+  const settings = await loadSettings();
+  await chrome.tabs.sendMessage(tab.id, { type: "subtitle-session", active: true, style: settings.subtitle_style });
   return { ok: true };
 }
 
 async function stopSubtitles(): Promise<{ ok: true }> {
   await chrome.runtime.sendMessage({ type: "offscreen:stop" }).catch(() => undefined);
-  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  if (tab?.id) await chrome.tabs.sendMessage(tab.id, { type: "subtitle-session", active: false }).catch(() => undefined);
+  const tabId = await subtitleTargetTabId();
+  if (tabId) await chrome.tabs.sendMessage(tabId, { type: "subtitle-session", active: false }).catch(() => undefined);
   return { ok: true };
 }
 
 async function forwardCaption(caption: Caption): Promise<void> {
-  const stored = await chrome.storage.session.get("subtitleTabId");
-  const tabId = stored.subtitleTabId as number | undefined;
+  const tabId = await subtitleSessionTabId();
   if (!tabId) return;
   await chrome.tabs.sendMessage(tabId, { type: "caption", caption });
+}
+
+async function subtitleSessionTabId(): Promise<number | undefined> {
+  const stored = await chrome.storage.session.get("subtitleTabId");
+  return stored.subtitleTabId as number | undefined;
+}
+
+// 字幕スタイルの変更や停止はオプションページから来るため、アクティブタブ宛てだと
+// 字幕セッション中の動画タブに届かない。offscreen が session に記録した字幕タブを優先し、
+// 記録が無いときだけ現行のアクティブタブに落とす。
+async function subtitleTargetTabId(): Promise<number | undefined> {
+  const tabId = await subtitleSessionTabId();
+  if (tabId) return tabId;
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  return tab?.id;
 }
 
 async function ensureOffscreen(): Promise<void> {
