@@ -370,7 +370,7 @@ async def subtitles(request: web.Request) -> web.WebSocketResponse:
             serve = await state.speech.ensure_serve()
             bridge = RealtimeSubtitleBridge(
                 serve.port or 0,
-                lambda text: _translate_caption(state, text),
+                lambda text, history: _translate_caption(state, text, history),
                 state.events,
                 translate_interim=bool(state.settings.data["translate_interim"]),
             )
@@ -401,8 +401,8 @@ async def _segment_loop(state, pcm_queue: asyncio.Queue, socket: web.WebSocketRe
     async def transcribe(pcm: bytes) -> str:
         return await state.speech.transcribe_pcm(pcm)
 
-    async def translate_text(text: str) -> str:
-        return await _translate_caption(state, text)
+    async def translate_text(text: str, history: list[dict[str, str]]) -> str:
+        return await _translate_caption(state, text, history)
 
     manager = SegmentManager(
         transcribe,
@@ -419,7 +419,7 @@ async def _segment_loop(state, pcm_queue: asyncio.Queue, socket: web.WebSocketRe
             await socket.send_json(caption.to_dict())
 
 
-async def _translate_caption(state, text: str) -> str:
+async def _translate_caption(state, text: str, history: list[dict[str, str]] | None = None) -> str:
     from local_translate.translate_service import TranslateRequest
 
     model_id = state.settings.data["active_translate_model"]
@@ -430,6 +430,7 @@ async def _translate_caption(state, text: str) -> str:
         source_lang=state.settings.data["source_lang"],
         form=state.settings.data["form"],
         glossary=state.settings.data["glossary"],
+        history=history or [],
     )
     parts = []
     async for delta in state.translator.stream(request):

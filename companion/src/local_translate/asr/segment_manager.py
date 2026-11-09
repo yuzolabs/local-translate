@@ -8,7 +8,7 @@ from typing import Awaitable, Callable
 from local_translate.asr.energy_vad import EnergyVad
 
 Transcriber = Callable[[bytes], Awaitable[str]]
-Translator = Callable[[str], Awaitable[str]]
+Translator = Callable[[str, list[dict[str, str]]], Awaitable[str]]
 
 
 @dataclass
@@ -56,6 +56,7 @@ class SegmentManager:
         self._last_transcribe_ms = -10_000
         self._seq = 0
         self._busy = False
+        self._history: list[dict[str, str]] = []
 
     @property
     def audio_ms(self) -> int:
@@ -105,8 +106,11 @@ class SegmentManager:
             return []
         translation = None
         if self.translator and (final or self.translate_interim) and text:
-            translation = await self.translator(text)
+            translation = await self.translator(text, self._history[-2:])
         self._seq += 1
+        if final and text:
+            self._history.append({"source": text, "translation": translation or ""})
+            del self._history[:-4]
         return [
             Caption(
                 seq=self._seq,

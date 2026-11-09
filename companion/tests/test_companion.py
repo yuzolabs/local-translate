@@ -193,12 +193,14 @@ def test_character_error_rate():
 @pytest.mark.asyncio
 async def test_segment_manager_retranscribes_then_finalizes():
     calls = {"n": 0}
+    histories: list[list[dict[str, str]]] = []
 
     async def transcribe(pcm: bytes) -> str:
         calls["n"] += 1
         return f"文{calls['n']}"
 
-    async def translate(text: str) -> str:
+    async def translate(text: str, history: list[dict[str, str]] | None = None) -> str:
+        histories.append(list(history or []))
         return f"訳:{text}"
 
     vad = EnergyVad(sample_rate=16000, threshold=100, min_speech_ms=200, min_silence_ms=400)
@@ -212,7 +214,16 @@ async def test_segment_manager_retranscribes_then_finalizes():
     final = await manager.push_pcm(silence)
     assert final[-1].final is True
     assert final[-1].translation == "訳:文3"
+    assert histories[-1] == []
     assert pcm16_rms(silence) == 0
+
+    # The next final segment carries the previous one as translation context.
+    await manager.push_pcm(speech)
+    await manager.push_pcm(speech)
+    second = await manager.push_pcm(silence)
+    assert second[-1].final is True
+    assert second[-1].translation == "訳:文6"
+    assert histories[-1] == [{"source": "文3", "translation": "訳:文3"}]
 
 
 @pytest.mark.asyncio
