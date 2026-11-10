@@ -11,19 +11,49 @@ const DEFAULT_STYLE: SubtitleStyle = {
 let host: HTMLElement | null = null;
 let style = DEFAULT_STYLE;
 let active = false;
+let sessionBanner = "";
+let bannerTimer: ReturnType<typeof setTimeout> | null = null;
 const lines = new Map<number, Caption>();
 
-export function setSubtitleSession(next: boolean, nextStyle?: SubtitleStyle): void {
+// 字幕開始時に数秒だけ出す「音声認識 → 翻訳」のモデル案内。
+const SESSION_BANNER_MS = 4000;
+
+export interface SubtitleModelsInfo {
+  asr?: string;
+  translate?: string;
+}
+
+export function setSubtitleSession(next: boolean, nextStyle?: SubtitleStyle, models?: SubtitleModelsInfo): void {
   active = next;
   if (nextStyle) style = nextStyle;
   if (!active) {
+    clearSessionBanner();
     host?.remove();
     host = null;
     lines.clear();
     return;
   }
+  if (models && (models.asr || models.translate)) {
+    const parts: string[] = [];
+    if (models.asr) parts.push(`音声認識 ${models.asr}`);
+    if (models.translate) parts.push(`翻訳 ${models.translate}`);
+    sessionBanner = parts.join(" → ");
+    if (bannerTimer) clearTimeout(bannerTimer);
+    bannerTimer = setTimeout(() => {
+      sessionBanner = "";
+      bannerTimer = null;
+      paint();
+    }, SESSION_BANNER_MS);
+  }
   ensureHost();
   trackVideo();
+  paint();
+}
+
+function clearSessionBanner(): void {
+  if (bannerTimer) clearTimeout(bannerTimer);
+  bannerTimer = null;
+  sessionBanner = "";
 }
 
 export function applySubtitleStyle(next: SubtitleStyle): void {
@@ -91,10 +121,12 @@ function paint(): void {
   host.shadowRoot.innerHTML = `
     <style>
       .stack { position: absolute; left: 8%; right: 8%; ${position}; display: flex; flex-direction: column; gap: 4px; text-align: center; }
+      .banner { color: ${style.text_color}; background: ${style.background}; font-size: ${Math.max(11, Math.round(style.font_size_px * 0.72))}px; padding: 2px 8px; border-radius: 6px; opacity: .85; }
       .line { color: ${style.text_color}; background: ${style.background}; font-size: ${style.font_size_px}px; line-height: 1.45; padding: 4px 8px; border-radius: 6px; }
       .orig { opacity: .78; font-size: .86em; }
     </style>
     <div class="stack">
+      ${sessionBanner ? `<div class="banner">${escapeHtml(sessionBanner)}</div>` : ""}
       ${visible
         .map((line) => {
           const original = style.show_original ? `<div class="orig">${escapeHtml(line.text)}</div>` : "";

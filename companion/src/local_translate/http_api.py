@@ -14,6 +14,7 @@ from aiohttp import WSMsgType, web
 from local_translate.asr.segment_manager import SegmentManager
 from local_translate.backend_choice import resolve_llama_backend
 from local_translate.asr.speech_serve import RealtimeSubtitleBridge
+from local_translate.speech_runtime import effective_subtitle_backend
 from local_translate.constants import (
     APP_VERSION,
     BUILT_WITH_PLAMO,
@@ -24,6 +25,7 @@ from local_translate.constants import (
     WINDOWS_HAAS_DECISION,
     WINDOWS_HAAS_DECISION_REASON,
 )
+from local_translate.current_models import build_current, model_identity
 from local_translate.errors import CompanionError
 from local_translate.languages import LANGUAGES
 from local_translate.license_texts import LICENSES
@@ -157,6 +159,7 @@ async def status(request: web.Request) -> web.Response:
                 "alternatives": list(suggestion.alternatives),
             },
             "llama": state.llama.status(),
+            "current": build_current(state),
             "active_sessions": {"subtitles": state.subtitle_sessions},
             "capabilities": [
                 "translate",
@@ -260,8 +263,15 @@ async def activate_model(request: web.Request) -> web.Response:
     state = _state(request)
     model_id = request.match_info["model_id"]
     preset = get_preset(model_id)
-    if preset and preset.kind != "translate" and state.models.custom_by_id(model_id) is None:
-        state.settings.update({"active_asr_model": model_id, "asr_engine": "haas" if model_id.startswith("Haas") else state.settings.data["asr_engine"]})
+    if preset and preset.kind != "translate":
+        # 種類が音声認識でないモデル（発話区間検出）は ASR として選べない。
+        if preset.kind != "asr":
+            raise CompanionError("invalid_asr_model", "発話区間検出は音声認識モデルとして選べません")
+        # 未ダウンロードなら翻訳と同じく 409 で拒否する。
+        if state.models.resolve_model_path(model_id) is None:
+            raise CompanionError("model_not_downloaded", "モデルがダウンロードされていません", 409)
+        state.settings.update({"active_asr_model": model_id})
+        await state.speech.sync_serve_selection(state.subtitle_sessions)
         return web.json_response({"status": "selected", "model_id": model_id})
     await _ensure_translate_model(state, model_id)
     state.settings.update({"active_translate_model": model_id})
@@ -301,10 +311,14 @@ async def get_settings(request: web.Request) -> web.Response:
 
 async def post_settings(request: web.Request) -> web.Response:
     state = _state(request)
-    updated = state.settings.update(await _json(request))
+    body = await _json(request)
+    asr_touched = bool({"active_asr_model", "asr_engine", "whisper_model"} & set(body))
+    updated = state.settings.update(body)
     state.llama.idle_timeout_sec = int(updated["idle_timeout_sec"])
     parallel = updated.get("parallel") or suggest_runtime(state.gpu).parallel
     state.translator.set_parallel(int(parallel))
+    if asr_touched:
+        await state.speech.sync_serve_selection(state.subtitle_sessions)
     return web.json_response(updated)
 
 
@@ -327,12 +341,20 @@ async def translate(request: web.Request) -> web.Response:
     state = _state(request)
     translate_request = validate_translate_request(await _json(request))
     model_id = translate_request.model_id or state.settings.data["active_translate_model"]
+    identity = model_identity(model_id, state.models)
     await _ensure_translate_model(state, model_id)
     if not translate_request.stream:
         parts = []
         async for delta in state.translator.stream(translate_request):
             parts.append(delta)
-        return web.json_response({"text": "".join(parts), "model_id": model_id})
+        return web.json_response(
+            {
+                "text": "".join(parts),
+                "model_id": model_id,
+                "model_label": identity["label"],
+                "model_short": identity["short_label"],
+            }
+        )
     response = web.StreamResponse(
         status=200,
         headers={"Content-Type": "text/event-stream", "Cache-Control": "no-cache"},
@@ -341,7 +363,15 @@ async def translate(request: web.Request) -> web.Response:
     try:
         async for delta in state.translator.stream(translate_request):
             await _sse(response, "delta", {"text": delta})
-        await _sse(response, "done", {"model_id": model_id})
+        await _sse(
+            response,
+            "done",
+            {
+                "model_id": model_id,
+                "model_label": identity["label"],
+                "model_short": identity["short_label"],
+            },
+        )
     except CompanionError as exc:
         await _sse(response, "error", {"code": exc.code, "message": exc.message})
     await response.write_eof()
@@ -369,7 +399,7 @@ async def subtitles(request: web.Request) -> web.WebSocketResponse:
         return socket
     state.subtitle_sessions += 1
     pcm_queue: asyncio.Queue[bytes | None] = asyncio.Queue()
-    backend = state.settings.data["subtitle_backend"]
+    backend = effective_subtitle_backend(state.settings.data)
     runner: asyncio.Task | None = None
     try:
         if backend == "speech-serve":

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 import uuid
 from pathlib import Path
 
@@ -15,9 +16,18 @@ from local_translate.event_bus import EventBus
 from local_translate.gpu_detect import GpuInfo
 from local_translate.llama_server import pick_free_port
 from local_translate.model_registry import ModelRegistry
-from local_translate.presets import get_preset
+from local_translate.presets import ModelPreset, get_preset
 from local_translate.runtime_fetch import RuntimeInstaller
 from local_translate.settings_store import SettingsStore
+
+
+def effective_subtitle_backend(settings_data: dict) -> str:
+    """ASR が whisper.cpp のとき、字幕は subtitle_backend 設定によらず
+    segment-worker 経路で動かす（speech serve は whisper を扱えないため）。"""
+    preset = get_preset(settings_data["active_asr_model"])
+    if preset and preset.kind == "asr" and preset.runtime == "whisper.cpp":
+        return "segment-worker"
+    return str(settings_data["subtitle_backend"])
 
 
 class SpeechRuntime:
@@ -36,6 +46,8 @@ class SpeechRuntime:
         self.gpu = gpu
         self.worker: SpeechWorkerClient | None = None
         self.serve: SpeechServeProcess | None = None
+        # 字幕セッション中に選択が変わったとき、次の字幕開始で載せ替える必要があるか。
+        self.restart_required = False
         self.log_path: Path | None = None
         self._lock = asyncio.Lock()
 
@@ -53,16 +65,48 @@ class SpeechRuntime:
         """whisper.cpp backend. CUDA when llama.cpp would also use CUDA."""
         return whisper_backend_name(self.settings.data.get("gpu_backend", "auto"), self.gpu)
 
+    def active_asr_preset(self) -> ModelPreset | None:
+        """選択中の ASR モデルのプリセット。設定は一本化済みで ASR プリセットが保証される。"""
+        return get_preset(self.settings.data["active_asr_model"])
+
     def active_catalog_name(self) -> str:
-        engine = self.settings.data["asr_engine"]
-        if engine == "qwen3-asr":
-            return "qwen3-asr-0.6b"
-        if engine == "haas":
-            preset = get_preset(self.settings.data["active_asr_model"])
-            if preset and preset.catalog_name:
-                return preset.catalog_name
-            return "haas-ja-v1.0"
-        return self.settings.data["asr_engine"]
+        """speech.cpp のカタログ名。選択が whisper のときはカタログを持たないので例外。"""
+        preset = self.active_asr_preset()
+        if preset and preset.kind == "asr" and preset.runtime == "speech.cpp" and preset.catalog_name:
+            return preset.catalog_name
+        raise CompanionError("asr_catalog_unavailable", "選択中の音声認識モデルは speech.cpp のカタログを持ちません", 409)
+
+    def serve_catalog(self) -> str | None:
+        """いま稼働中の serve のカタログ名。停止していれば None。"""
+        if self.serve and self.serve.process and self.serve.process.returncode is None and self.serve.port:
+            return self.serve.models[0] if self.serve.models else None
+        return None
+
+    def desired_serve_catalog(self) -> str | None:
+        """選択中の ASR が speech.cpp のとき次に上げるべきカタログ。whisper なら不要。"""
+        preset = self.active_asr_preset()
+        if preset and preset.kind == "asr" and preset.runtime == "speech.cpp":
+            return preset.catalog_name
+        return None
+
+    async def sync_serve_selection(self, active_subtitle_sessions: int) -> None:
+        """ASR の選択変更を serve へ反映する。
+
+        セッションがないときは古い serve を止めて次の開始で新カタログを起動する。
+        別の字幕セッションが動いている間は止めず、「次の字幕開始時に切り替え」を示す。
+        """
+        desired = self.desired_serve_catalog()
+        current = self.serve_catalog()
+        if current == desired:
+            self.restart_required = False
+            return
+        if active_subtitle_sessions > 0:
+            self.restart_required = True
+            return
+        if self.serve:
+            await self.serve.stop()
+            self.serve = None
+        self.restart_required = False
 
     async def ensure_speech_binary(self) -> str:
         binary = await asyncio.to_thread(self.installer.ensure_speech, self.runtime_backend())
@@ -70,9 +114,10 @@ class SpeechRuntime:
 
     async def ensure_worker(self) -> SpeechWorkerClient:
         async with self._lock:
-            catalog = self.active_catalog_name()
-            if catalog.startswith("whisper"):
+            preset = self.active_asr_preset()
+            if preset is None or preset.runtime != "speech.cpp":
                 raise CompanionError("worker_not_for_whisper", "whisper.cpp は worker では起動しません")
+            catalog = preset.catalog_name
             if self.worker and self.worker.model == catalog and self.worker.process and self.worker.process.returncode is None:
                 return self.worker
             if self.worker:
@@ -84,7 +129,8 @@ class SpeechRuntime:
             return self.worker
 
     async def transcribe_pcm(self, pcm: bytes, sample_rate: int = 16000) -> str:
-        if self.settings.data["asr_engine"] == "whisper":
+        preset = self.active_asr_preset()
+        if preset is None or preset.runtime == "whisper.cpp":
             return await self._whisper(pcm, sample_rate)
         worker = await self.ensure_worker()
         result = await worker.transcribe(pcm, sample_rate, request_id=uuid.uuid4().hex)
@@ -92,21 +138,25 @@ class SpeechRuntime:
 
     async def ensure_serve(self) -> SpeechServeProcess:
         async with self._lock:
-            if self.serve and self.serve.process and self.serve.process.returncode is None and self.serve.port:
-                return self.serve
-            binary = await self.ensure_speech_binary()
             catalog = self.active_catalog_name()
-            if catalog.startswith("whisper"):
-                catalog = "haas-ja-v1.0"
+            if self.serve and self.serve.process and self.serve.process.returncode is None and self.serve.port:
+                if self.serve.models[:1] == [catalog]:
+                    self.serve.last_used = time.monotonic()
+                    self.restart_required = False
+                    return self.serve
+                # カタログが変わっていたら次の字幕開始時に起動し直す。
+                await self.serve.stop()
+            binary = await self.ensure_speech_binary()
             port = pick_free_port()
             self.serve = SpeechServeProcess(binary, [catalog, "silero-vad"], device=self.device_name(), log_path=self.log_path)
             self.events.publish("asr.serve.starting", model=catalog, port=port)
             await self.serve.start(port)
             self.events.publish("asr.serve.ready", model=catalog, port=port)
+            self.restart_required = False
             return self.serve
 
     async def _whisper(self, pcm: bytes, sample_rate: int) -> str:
-        model_id = self.settings.data.get("whisper_model") or "whisper-base"
+        model_id = self.settings.data["active_asr_model"]
         record = self.registry.file_record(model_id)
         if not record:
             raise CompanionError("whisper_model_missing", "whisper モデルを先にダウンロードしてください", 409)

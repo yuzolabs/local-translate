@@ -166,6 +166,8 @@ class ModelRegistry:
             "repo": preset.repo,
             "filename": preset.filename,
             "catalog_name": preset.catalog_name,
+            "display_name": preset.display_name,
+            "short_name": preset.short_name,
             "note": preset.note,
             "active": preset.model_id in {active_translate, active_asr},
         }
@@ -188,6 +190,9 @@ class ModelRegistry:
             "runtime": "llama.cpp",
             "path": custom["path"],
             "alias": custom.get("alias", model_id),
+            # 任意 GGUF は利用者が付けた別名 (alias) と、常に短い名前 GGUF で示す。
+            "display_name": str(custom.get("alias") or model_id),
+            "short_name": "GGUF",
             "note": "任意 GGUF",
             "active": model_id == active_translate,
         }

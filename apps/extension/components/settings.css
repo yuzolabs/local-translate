@@ -82,6 +82,7 @@ section {
 h1, h2 { margin: 0 0 8px; font-weight: 620; }
 h1 { font-size: 20px; }
 h2 { font-size: 15px; color: var(--teal); }
+h3 { font-size: 13px; margin: 6px 0 0; color: #4d625e; }
 
 .row, .glossary, .models { display: grid; gap: 8px; }
 .inline { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
@@ -103,6 +104,21 @@ textarea { min-height: 72px; resize: vertical; }
 }
 .note { color: #4d625e; font-size: 12px; }
 .fault { color: var(--fault); }
+.badge {
+  display: inline-block;
+  border-radius: 999px;
+  padding: 1px 8px;
+  font-size: 11px;
+  font-weight: 620;
+  vertical-align: 1px;
+}
+.badge.active { background: var(--teal); color: white; }
+.badge.suggested { background: var(--amber); color: white; }
+.model.active { background: #eaf4f1; border-radius: 10px; padding: 8px 10px; border-bottom-color: transparent; }
+.model-title { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.current-models { display: grid; gap: 2px; }
+.current-line { display: flex; align-items: center; gap: 8px; margin-top: 6px; }
+.current-line .dot { flex: none; }
 .preview {
   min-height: 1.4em;
   padding: 8px;

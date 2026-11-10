@@ -1,0 +1,23 @@
+{
+  "measured_at": "2026-11-10",
+  "device": "NVIDIA GeForce RTX 4070 Ti SUPER",
+  "runtime": "whisper.cpp b5454 win-cuda-12.4",
+  "model_id": "whisper-large-v3-turbo",
+  "backend": "cuda",
+  "pipeline": "segment-worker (EnergyVad 450 / 再文字起こし 1500ms / whisper-cli を発話ごとに起動)",
+  "translate_model": "plamo-3-translate-8b-GGUF (llama-server CUDA, 常駐)",
+  "dataset": "FLEURS ja_jp test, asr-ja-bench v1.1 fleurs",
+  "license": "CC BY 4.0",
+  "count": 30,
+  "no_caption_count": 4,
+  "no_caption_note": "EnergyVad が発話を開かなかった 4 本。静かな発話 (最大 RMS 97 など) で、segment-worker 経路のエネルギー検出では確定しない。speech-serve 経路 (silero VAD) の Haas 計測では 30 本すべて確定した。",
+  "latency_sec": {
+    "count": 26,
+    "mean": 3.27,
+    "p50": 2.985,
+    "p95": 5.097
+  },
+  "translated": 26,
+  "note": "認識全文と訳文は含めない。レイテンシは、VAD が返した発話終端の音声を送り終えた時刻から、翻訳を含む確定字幕まで。比較: reports/speech-cpp-haas-vulkan-win.json (speech-serve + silero VAD + 8B 翻訳) は mean 0.875 秒 / p50 0.783 秒 / p95 0.989 秒。",
+  "chrome_manual_check": "未実施。拡張からの字幕開始は利用者の操作が必要。"
+}

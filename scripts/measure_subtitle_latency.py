@@ -84,7 +84,17 @@ async def measure_one(session: aiohttp.ClientSession, url: str, token: str, pcm:
         else:
             await sender
         if not finals:
-            raise SystemExit("確定字幕が返りませんでした")
+            # segment-worker 経路の EnergyVad は静かな発話を開かないことがある。
+            # 測定を止めず、確定なしとして記録する。
+            return {
+                "audio_sec": round(len(pcm) / (16000 * 2), 3),
+                "latency_sec": None,
+                "no_caption": True,
+                "wall_sec": round(time.perf_counter() - started, 3),
+                "has_translation": False,
+                "text": "",
+                "translation": "",
+            }
         chosen_at, chosen = finals[-1]
         end_ms = chosen.get("end_ms")
         utterance_end_sent_at = None
@@ -116,16 +126,18 @@ async def run(references: Path, state: Path) -> list[dict]:
             measured = await measure_one(session, url, token, read_wav(Path(row["wav"])))
             measured["id"] = row["id"]
             results.append(measured)
-            print(row["id"], measured["latency_sec"], flush=True)
+            print(row["id"], measured["latency_sec"] if measured["latency_sec"] is not None else "no_caption", flush=True)
     return results
 
 
 def summary(results: list[dict], manifest: dict) -> dict:
+    measured_rows = [row for row in results if row["latency_sec"] is not None]
     return {
         "dataset": manifest.get("dataset"),
         "license": manifest.get("license"),
         "count": len(results),
-        "latency_sec": latency_stats([row["latency_sec"] for row in results]),
+        "no_caption_count": sum(1 for row in results if row.get("no_caption")),
+        "latency_sec": latency_stats([row["latency_sec"] for row in measured_rows]),
         "translated": sum(1 for row in results if row["has_translation"]),
         "note": "認識全文と訳文は含めない。レイテンシは、VAD が返した発話終端の音声を送り終えた時刻から、翻訳を含む確定字幕まで。",
     }

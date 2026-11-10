@@ -29,6 +29,7 @@ export function showSelectionPopup(text: string, x: number, y: number): void {
   `;
   shadow.getElementById("close")?.addEventListener("click", closeSelectionPopup);
   document.documentElement.append(host);
+  const label = shadow.querySelector(".label");
   const id = `sel-${++requestId}`;
   const port = chrome.runtime.connect({ name: "translate" });
   port.onMessage.addListener((message) => {
@@ -36,6 +37,10 @@ export function showSelectionPopup(text: string, x: number, y: number): void {
     const body = shadow.getElementById("body");
     if (!body) return;
     body.textContent = message.type === "error" ? message.message : message.text;
+    // 完了イベントに使ったモデルの短い名前があれば見出しに添える。
+    if (message.type === "done" && message.modelShort && label) {
+      label.textContent = `選択範囲 · ${message.modelShort}`;
+    }
   });
   port.postMessage({ type: "translate", requestId: id, text: trimmed, priority: TRANSLATION_PRIORITY.selection });
 }

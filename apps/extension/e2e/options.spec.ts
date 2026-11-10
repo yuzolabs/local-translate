@@ -67,6 +67,10 @@ test("options page shows the local translation controls", async () => {
 });
 
 async function exerciseMockFlows(page): Promise<void> {
+  await expect(page.getByText("PLaMo 3 Translate 0.8B", { exact: false }).first()).toBeVisible();
+  await expect(page.getByText("待機中（字幕開始時に起動）", { exact: false }).first()).toBeVisible();
+  // 推奨は 8B（未ダウンロード）なので切り替えボタンではなく取得案内を出す。
+  await expect(page.getByText("未ダウンロードです。一覧の「推奨」の行からダウンロードできます。")).toBeVisible();
   await expect(page.getByText("plamo-3-translate-8b-GGUF")).toBeVisible();
   await page.getByRole("button", { name: "ライセンスを見る" }).click();
   await expect(page.getByText("モックのライセンス概要です。")).toBeVisible();

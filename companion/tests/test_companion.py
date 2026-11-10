@@ -4,6 +4,7 @@ import hashlib
 import json
 import sys
 import time
+import types
 from pathlib import Path
 
 import aiohttp
@@ -23,6 +24,7 @@ from local_translate.languages import LANGUAGES
 from local_translate.llama_server import LLAMA_ARGV_FLAGS, build_llama_server_argv, pick_free_port
 from local_translate.nm_framing import read_native_message, write_native_message
 from local_translate.paths import AppPaths, default_app_paths, resolve_data_dir, resolve_state_dir
+from local_translate.presets import PRESETS
 from local_translate.process_lock import ProcessLock
 from local_translate.prompt_builder import build_pfml3_prompt
 from local_translate.runtime_fetch import (
@@ -76,6 +78,34 @@ def test_languages_cover_the_model_card():
     assert len(LANGUAGES) == 53
     assert dict(LANGUAGES)["ja"] == "日本語"
     assert dict(LANGUAGES)["zh-hans"] != dict(LANGUAGES)["zh-hant"]
+
+
+def test_every_preset_has_a_display_name_and_a_short_badge_name():
+    # 拡張は ID を加工しない。全プリセットが表示名と 4 文字以内の短い名前を持つ。
+    for preset in PRESETS:
+        assert preset.display_name.strip(), f"{preset.model_id} に表示名がありません"
+        assert len(preset.short_name) <= 4, f"{preset.short_name} は 4 文字以内ください ({preset.model_id})"
+        assert preset.short_name.strip(), f"{preset.model_id} の短い名前が空です"
+    ids = {preset.model_id for preset in PRESETS}
+    assert "Haas-ja-v1.0" in ids and "whisper-large-v3-turbo" in ids
+
+
+def test_registry_rows_carry_display_names(tmp_path: Path):
+    from local_translate.model_registry import ModelRegistry
+
+    registry = ModelRegistry(tmp_path / "models.json", tmp_path / "models")
+    gguf = tmp_path / "mine.gguf"
+    gguf.write_bytes(b"gguf")
+    registry.register_local_gguf("my-model", gguf, alias="作業用モデル", sha256="abc")
+    rows = registry.list_models("plamo-3-translate-8b-GGUF", "Haas-ja-v1.0", None)
+    by_id = {row["id"]: row for row in rows}
+    assert by_id["plamo-3-translate-8b-GGUF"]["display_name"] == "PLaMo 3 Translate 8B"
+    assert by_id["plamo-3-translate-8b-GGUF"]["short_name"] == "8B"
+    assert by_id["Haas-ja-v1.0"]["display_name"] == "Haas-ja v1.0"
+    assert by_id["my-model"]["display_name"] == "作業用モデル"
+    assert by_id["my-model"]["short_name"] == "GGUF"
+    assert by_id["plamo-3-translate-8b-GGUF"]["active"] is True
+    assert by_id["my-model"]["active"] is False
 
 
 def test_pfml3_matches_the_model_card_examples():
@@ -193,6 +223,410 @@ def test_vram_tiers():
     assert "実験的" in igpu.reason
 
 
+def test_asr_settings_migrate_to_the_actually_used_model(tmp_path: Path):
+    # 移行は「これまで実際に使われていたモデル」を選択中にする。
+    def store_with(stored: dict) -> "SettingsStore":
+        path = tmp_path / f"settings-{len(stored)}-{stored.get('asr_engine')}-{stored.get('active_asr_model')}.json"
+        path.write_text(json.dumps(stored), encoding="utf-8")
+        return SettingsStore(path)
+
+    # engine whisper → whisper_model（whisper のプリセットでなければ whisper-base）
+    migrated = store_with({"asr_engine": "whisper", "whisper_model": "whisper-large-v3-turbo", "active_asr_model": "Haas-ja-v1.0"})
+    assert migrated.data["active_asr_model"] == "whisper-large-v3-turbo"
+    assert migrated.data["asr_engine"] == "whisper"
+    assert migrated.data["whisper_model"] == "whisper-large-v3-turbo"
+    assert json.loads(migrated.path.read_text(encoding="utf-8"))["active_asr_model"] == "whisper-large-v3-turbo"
+    fallback = store_with({"asr_engine": "whisper", "whisper_model": "silero-vad", "active_asr_model": "Haas-ja-v1.0"})
+    assert fallback.data["active_asr_model"] == "whisper-base"
+    # engine qwen3-asr → qwen3-asr-0.6b（一覧上の選択が Haas のままでも実態は qwen3）
+    qwen = store_with({"asr_engine": "qwen3-asr", "active_asr_model": "Haas-ja-v1.0"})
+    assert qwen.data["active_asr_model"] == "qwen3-asr-0.6b"
+    # engine haas: active が speech.cpp の音声認識プリセットならそのまま
+    keep = store_with({"asr_engine": "haas", "active_asr_model": "Haas-ja-v1.0-F16"})
+    assert keep.data["active_asr_model"] == "Haas-ja-v1.0-F16"
+    # それ以外（silero-vad、whisper-*、不明な ID）→ Haas-ja-v1.0
+    for bad in ("silero-vad", "whisper-base", "unknown-model"):
+        reset = store_with({"asr_engine": "haas", "active_asr_model": bad})
+        assert reset.data["active_asr_model"] == "Haas-ja-v1.0"
+
+
+def test_legacy_asr_posts_translate_to_active_asr_model(tmp_path: Path):
+    store = SettingsStore(tmp_path / "settings.json")
+    # 旧 UI の「エンジンで whisper」＋「whisper モデル選択」
+    store.update({"asr_engine": "whisper", "whisper_model": "whisper-large-v3-turbo"})
+    assert store.data["active_asr_model"] == "whisper-large-v3-turbo"
+    # engine qwen3-asr
+    store.update({"asr_engine": "qwen3-asr"})
+    assert store.data["active_asr_model"] == "qwen3-asr-0.6b"
+    # engine haas への戻し: speech.cpp の ASR プリセットはそのまま使われる
+    store.update({"asr_engine": "haas"})
+    assert store.data["active_asr_model"] == "qwen3-asr-0.6b"
+    # 新しいPOST: モデルを直接選ぶ
+    store.update({"active_asr_model": "Haas-ja-v1.0-F16"})
+    assert store.data["asr_engine"] == "haas"
+    # 発話区間検出は拒否
+    with pytest.raises(Exception) as excinfo:
+        store.update({"active_asr_model": "silero-vad"})
+    assert excinfo.value.code == "invalid_asr_model"
+    with pytest.raises(Exception) as excinfo:
+        store.update({"asr_engine": "bogus"})
+    assert excinfo.value.code == "invalid_asr_engine"
+
+
+def test_active_catalog_name_follows_the_unified_asr_selection(tmp_path: Path):
+    paths = AppPaths.create(tmp_path / "state", tmp_path / "data")
+    state = AppState(paths)
+    state.settings.update({"active_asr_model": "Haas-ja-v1.0-F16"})
+    assert state.speech.active_catalog_name() == "haas-ja-v1.0:f16"
+    state.settings.update({"active_asr_model": "qwen3-asr-0.6b"})
+    assert state.speech.active_catalog_name() == "qwen3-asr-0.6b"
+    state.settings.update({"active_asr_model": "whisper-large-v3-turbo"})
+    with pytest.raises(Exception) as excinfo:
+        state.speech.active_catalog_name()
+    assert excinfo.value.code == "asr_catalog_unavailable"
+
+
+@pytest.mark.asyncio
+async def test_transcribe_dispatches_on_the_active_asr_runtime(tmp_path: Path, monkeypatch):
+    from local_translate.speech_runtime import SpeechRuntime
+
+    paths = AppPaths.create(tmp_path / "state", tmp_path / "data")
+    state = AppState(paths)
+    state.settings.update({"active_asr_model": "whisper-large-v3-turbo"})
+    seen: dict[str, str] = {}
+
+    async def fake_whisper(self, pcm: bytes, sample_rate: int) -> str:
+        del pcm, sample_rate
+        seen["model"] = self.settings.data["active_asr_model"]
+        return "音声認識結果"
+
+    monkeypatch.setattr(SpeechRuntime, "_whisper", fake_whisper)
+    assert await state.speech.transcribe_pcm(b"\x00\x00" * 16) == "音声認識結果"
+    assert seen["model"] == "whisper-large-v3-turbo"
+
+
+@pytest.mark.asyncio
+async def test_asr_activation_rejects_vad_and_undownloaded_models(tmp_path: Path):
+    paths = AppPaths.create(tmp_path / "state", tmp_path / "data")
+    state = AppState(paths)
+    app = create_app(state)
+    async with TestClient(TestServer(app)) as client:
+        headers = {"Authorization": f"Bearer {state.token}"}
+        vad = await client.post("/v1/models/silero-vad/activate", headers=headers)
+        assert vad.status == 400
+        assert (await vad.json())["error"]["code"] == "invalid_asr_model"
+        missing = await client.post("/v1/models/qwen3-asr-0.6b/activate", headers=headers)
+        assert missing.status == 409
+        assert (await missing.json())["error"]["code"] == "model_not_downloaded"
+        marker = tmp_path / "catalog-marker"
+        marker.write_text("qwen3-asr-0.6b", encoding="utf-8")
+        state.models.mark_file("qwen3-asr-0.6b", marker)
+        selected = await client.post("/v1/models/qwen3-asr-0.6b/activate", headers=headers)
+        assert selected.status == 200
+        assert state.settings.data["active_asr_model"] == "qwen3-asr-0.6b"
+        assert state.settings.data["asr_engine"] == "qwen3-asr"
+
+
+class FakeServeProcess:
+    """SpeechServeProcess の偽物。起動と停止だけを記録する。"""
+
+    def __init__(self, binary: str, models: list[str], device: str = "cpu", log_path=None) -> None:
+        self.binary = binary
+        self.models = list(models)
+        self.device = device
+        self.process = types.SimpleNamespace(returncode=None)
+        self.port: int | None = None
+        self.stopped = 0
+        self.started = 0
+
+    async def start(self, port: int) -> None:
+        self.started += 1
+        self.port = port
+
+    async def stop(self) -> None:
+        self.stopped += 1
+        self.process = None
+        self.port = None
+
+
+@pytest.mark.asyncio
+async def test_asr_selection_change_restarts_the_serve_on_the_next_start(tmp_path: Path, monkeypatch):
+    paths = AppPaths.create(tmp_path / "state", tmp_path / "data")
+    state = AppState(paths)
+    speech = state.speech
+    monkeypatch.setattr("local_translate.speech_runtime.SpeechServeProcess", FakeServeProcess)
+
+    async def fake_binary() -> str:
+        return "speech-binary"
+
+    speech.ensure_speech_binary = fake_binary
+    marker = tmp_path / "catalog-marker"
+    marker.write_text("haas-ja-v1.0", encoding="utf-8")
+    state.models.mark_file("Haas-ja-v1.0", marker)
+    state.models.mark_file("qwen3-asr-0.6b", tmp_path / "qwen-marker")
+
+    first = await speech.ensure_serve()
+    assert first.models == ["haas-ja-v1.0", "silero-vad"]
+    assert speech.restart_required is False
+
+    # 字幕セッションがないときに選択を変えたら古い serve を止める。
+    state.settings.update({"active_asr_model": "qwen3-asr-0.6b"})
+    await speech.sync_serve_selection(0)
+    assert speech.serve is None and speech.restart_required is False
+    assert first.stopped == 1
+
+    second = await speech.ensure_serve()
+    assert second.models == ["qwen3-asr-0.6b", "silero-vad"]
+    assert second is not first
+
+
+@pytest.mark.asyncio
+async def test_asr_selection_change_defers_restart_while_a_subtitle_session_runs(tmp_path: Path, monkeypatch):
+    paths = AppPaths.create(tmp_path / "state", tmp_path / "data")
+    state = AppState(paths)
+    speech = state.speech
+    monkeypatch.setattr("local_translate.speech_runtime.SpeechServeProcess", FakeServeProcess)
+
+    async def fake_binary() -> str:
+        return "speech-binary"
+
+    speech.ensure_speech_binary = fake_binary
+    marker = tmp_path / "catalog-marker"
+    marker.write_text("haas-ja-v1.0", encoding="utf-8")
+    state.models.mark_file("Haas-ja-v1.0", marker)
+    state.models.mark_file("Haas-ja-v1.0-F16", tmp_path / "f16-marker")
+
+    first = await speech.ensure_serve()
+    # 別の字幕セッションが動いている間は止めず、次の字幕開始時の切り替えを示す。
+    state.settings.update({"active_asr_model": "Haas-ja-v1.0-F16"})
+    await speech.sync_serve_selection(1)
+    assert speech.restart_required is True
+    assert speech.serve is first and first.stopped == 0
+
+    restarted = await speech.ensure_serve()
+    assert restarted is not first
+    assert restarted.models == ["haas-ja-v1.0:f16", "silero-vad"]
+    assert first.stopped == 1
+    assert speech.restart_required is False
+
+
+def test_effective_subtitle_backend_forces_segment_worker_for_whisper(tmp_path: Path):
+    from local_translate.speech_runtime import effective_subtitle_backend
+
+    paths = AppPaths.create(tmp_path / "state", tmp_path / "data")
+    state = AppState(paths)
+    data = state.settings.data
+    data["subtitle_backend"] = "speech-serve"
+    data["active_asr_model"] = "Haas-ja-v1.0"
+    assert effective_subtitle_backend(data) == "speech-serve"
+    data["active_asr_model"] = "whisper-large-v3-turbo"
+    assert effective_subtitle_backend(data) == "segment-worker"
+    data["subtitle_backend"] = "segment-worker"
+    data["active_asr_model"] = "qwen3-asr-0.6b"
+    assert effective_subtitle_backend(data) == "segment-worker"
+
+
+@pytest.mark.asyncio
+async def test_whisper_subtitles_run_through_the_segment_worker_path(tmp_path: Path):
+    paths = AppPaths.create(tmp_path / "state", tmp_path / "data")
+    state = AppState(paths)
+    state.llama = FakeLlama()
+    state.translator.llama = state.llama
+    model = tmp_path / "model.gguf"
+    model.write_bytes(b"gguf")
+    state.models.mark_file("plamo-3-translate-0.8b-GGUF", model)
+    # 新規導入時の既定は GPU 推奨に変わるので、テストでは 0.8B を明示する。
+    state.settings.update({"active_translate_model": "plamo-3-translate-0.8b-GGUF"})
+    # subtitle_backend が speech-serve 既定でも、whisper 選択なら segment-worker 経路になる。
+    assert state.settings.data["subtitle_backend"] == "speech-serve"
+    marker = tmp_path / "whisper-marker"
+    marker.write_bytes(b"ggml")
+    state.models.mark_file("whisper-large-v3-turbo", marker)
+    state.settings.update({"active_asr_model": "whisper-large-v3-turbo", "translate_interim": False})
+    seen: dict[str, str] = {}
+
+    async def transcribe_pcm(pcm: bytes, sample_rate: int = 16000) -> str:
+        del pcm, sample_rate
+        seen["model"] = state.settings.data["active_asr_model"]
+        return "会議です"
+
+    state.speech.transcribe_pcm = transcribe_pcm
+    app = create_app(state)
+    async with TestClient(TestServer(app)) as client:
+        async with client.ws_connect("/api/subtitles") as socket:
+            await socket.send_json({"type": "auth", "token": state.token})
+            await socket.send_bytes(pcm_tone(16000, 2000))
+            await socket.send_bytes(pcm_tone(16000, 0))
+            await socket.send_json({"type": "stop"})
+            captions = []
+            while True:
+                message = await socket.receive(timeout=5)
+                if message.type is not aiohttp.WSMsgType.TEXT:
+                    break
+                captions.append(message.json())
+                if captions[-1].get("final"):
+                    break
+    finals = [caption for caption in captions if caption.get("final")]
+    assert finals and finals[-1]["text"] == "会議です"
+    assert seen["model"] == "whisper-large-v3-turbo"
+
+
+def _current_test_state(tmp_path: Path):
+    from local_translate.current_models import build_current
+
+    paths = AppPaths.create(tmp_path / "state", tmp_path / "data")
+    state = AppState(paths)
+    state.gpu = GpuInfo("cuda", "RTX", 16376, 14000, False, 32000, True, True)
+    state.llama = FakeLlama()
+    return state, build_current
+
+
+def test_status_current_reports_the_ready_translate_model(tmp_path: Path):
+    state, build_current = _current_test_state(tmp_path)
+    model = tmp_path / "model.gguf"
+    model.write_bytes(b"gguf")
+    state.models.mark_file("plamo-3-translate-8b-GGUF", model)
+    state.settings.update({"active_translate_model": "plamo-3-translate-8b-GGUF"})
+    state.llama.state = "ready"
+    state.llama.model_id = "plamo-3-translate-8b-GGUF"
+    current = build_current(state)
+    translate = current["translate"]
+    assert translate["selected"] == {
+        "id": "plamo-3-translate-8b-GGUF",
+        "label": "PLaMo 3 Translate 8B",
+        "quant": "Q4_K_M",
+        "short_label": "8B",
+    }
+    assert translate["loaded"] == {"id": "plamo-3-translate-8b-GGUF"}
+    assert translate["state"] == "ready"
+    assert translate["backend"] == "cuda"
+    assert translate["backend_error"] is None
+    assert translate["context_size"] == 8192
+    assert translate["n_gpu_layers"] == 99
+    assert translate["parallel"] == 2
+    # 選択中と違うモデルが稼働していれば「切り替え中」と分かる形で返す。
+    state.llama.model_id = "plamo-3-translate-0.8b-GGUF"
+    assert build_current(state)["translate"]["loaded"] == {"id": "plamo-3-translate-0.8b-GGUF"}
+
+
+def test_status_current_covers_starting_stopped_and_not_downloaded(tmp_path: Path):
+    state, build_current = _current_test_state(tmp_path)
+    model = tmp_path / "model.gguf"
+    model.write_bytes(b"gguf")
+    state.models.mark_file("plamo-3-translate-31b-GGUF-Q2_K", model)
+    state.settings.update({"active_translate_model": "plamo-3-translate-31b-GGUF-Q2_K"})
+    state.llama.state = "starting"
+    state.llama.model_id = "plamo-3-translate-31b-GGUF-Q2_K"
+    current = build_current(state)["translate"]
+    assert current["state"] == "starting"
+    assert current["loaded"] == {"id": "plamo-3-translate-31b-GGUF-Q2_K"}
+    state.llama.state = "stopped"
+    state.llama.model_id = None
+    current = build_current(state)["translate"]
+    assert current["state"] == "stopped" and current["loaded"] is None
+    # ダウンロードされていない選択は稼働状況より優先して未ダウンロードと返す。
+    state.settings.update({"active_translate_model": "plamo-3-translate-31b-GGUF-Q4_K_M"})
+    current = build_current(state)["translate"]
+    assert current["state"] == "not_downloaded"
+
+
+def test_status_current_returns_backend_errors_without_raising(tmp_path: Path):
+    state, build_current = _current_test_state(tmp_path)
+    state.gpu = GpuInfo("cpu", "CPU", None, None, False, 8000, False, False)
+    state.settings.update({"gpu_backend": "cuda"})
+    current = build_current(state)["translate"]
+    assert current["backend"] is None
+    assert current["backend_error"]
+
+
+def test_status_current_reports_the_running_asr_serve_and_pending_restart(tmp_path: Path):
+    state, build_current = _current_test_state(tmp_path)
+    marker = tmp_path / "catalog-marker"
+    marker.write_text("haas-ja-v1.0", encoding="utf-8")
+    state.models.mark_file("Haas-ja-v1.0", marker)
+    state.speech.serve = FakeServeProcess("speech", ["haas-ja-v1.0", "silero-vad"])
+    state.speech.serve.port = 9
+    current = build_current(state)["asr"]
+    assert current["selected"]["id"] == "Haas-ja-v1.0"
+    assert current["selected"]["label"] == "Haas-ja v1.0"
+    assert current["runtime"] == "speech.cpp"
+    assert current["subtitle_pipeline"] == "speech-serve"
+    assert current["loaded"] == {"id": "Haas-ja-v1.0"}
+    assert current["state"] == "ready"
+    assert current["device"] == "gpu"
+    assert current["restart_required"] is False
+    # 字幕セッション中に選択が変われば次の字幕開始時に切り替え。
+    state.speech.restart_required = True
+    assert build_current(state)["asr"]["restart_required"] is True
+
+
+def test_status_current_marks_an_undownloaded_asr_stopped_and_whisper_cpu(tmp_path: Path):
+    state, build_current = _current_test_state(tmp_path)
+    marker = tmp_path / "whisper-marker"
+    marker.write_bytes(b"ggml")
+    state.models.mark_file("whisper-base", marker)
+    state.settings.update({"active_asr_model": "whisper-base"})
+    current = build_current(state)["asr"]
+    assert current["runtime"] == "whisper.cpp"
+    assert current["subtitle_pipeline"] == "segment-worker"
+    assert current["state"] == "stopped"
+    assert current["loaded"] is None
+    assert current["device"] == "cuda"
+    # 未ダウンロードの ASR は待機中ではなく未ダウンロード。
+    state.settings.update({"active_asr_model": "whisper-large-v3-turbo"})
+    current = build_current(state)["asr"]
+    assert current["state"] == "not_downloaded"
+
+
+@pytest.mark.asyncio
+async def test_status_endpoint_includes_current_models(tmp_path: Path):
+    state, _build = _current_test_state(tmp_path)
+    model = tmp_path / "model.gguf"
+    model.write_bytes(b"gguf")
+    state.models.mark_file("plamo-3-translate-0.8b-GGUF", model)
+    # 新規導入時の既定は GPU 推奨に変わるので、テストでは 0.8B を明示する。
+    state.settings.update({"active_translate_model": "plamo-3-translate-0.8b-GGUF"})
+    app = create_app(state)
+    async with TestClient(TestServer(app)) as client:
+        headers = {"Authorization": f"Bearer {state.token}"}
+        response = await client.get("/v1/status", headers=headers)
+        assert response.status == 200
+        body = await response.json()
+    current = body["current"]
+    assert current["translate"]["selected"]["id"] == "plamo-3-translate-0.8b-GGUF"
+    assert current["translate"]["selected"]["short_label"] == "0.8B"
+    assert current["asr"]["selected"]["id"] == "Haas-ja-v1.0"
+    assert set(current["translate"]) >= {"selected", "loaded", "state", "backend", "context_size", "n_gpu_layers", "parallel"}
+    assert set(current["asr"]) >= {"selected", "runtime", "subtitle_pipeline", "loaded", "state", "device", "restart_required"}
+
+
+def test_fresh_install_defaults_to_the_suggested_translate_model(tmp_path: Path, monkeypatch):
+    from local_translate import daemon as daemon_module
+
+    paths = AppPaths.create(tmp_path / "state", tmp_path / "data")
+    paths.ensure()
+    gpu = GpuInfo("cuda", "RTX", 16376, 14000, False, 32000, True, True)
+    monkeypatch.setattr(daemon_module, "detect_gpu", lambda: gpu)
+    # 設定ファイルがなければ推奨 (16GB では 8B) が既定になる。
+    state = AppState(paths)
+    assert state.settings.data["active_translate_model"] == "plamo-3-translate-8b-GGUF"
+    # active_translate_model が保存されていない既存ファイルでも同じ。
+    partial = AppPaths.create(tmp_path / "state-partial", tmp_path / "data-partial")
+    partial.ensure()
+    partial.settings_path.write_text(json.dumps({"parallel": 3}), encoding="utf-8")
+    partial_state = AppState(partial)
+    assert partial_state.settings.data["active_translate_model"] == "plamo-3-translate-8b-GGUF"
+    assert partial_state.translator.parallel_slots == 3
+    # 既存の選択は変えない。
+    kept = AppPaths.create(tmp_path / "state-kept", tmp_path / "data-kept")
+    kept.ensure()
+    kept.settings_path.write_text(
+        json.dumps({"active_translate_model": "plamo-3-translate-2b-GGUF"}), encoding="utf-8"
+    )
+    stored = AppState(kept).settings.data["active_translate_model"]
+    assert stored == "plamo-3-translate-2b-GGUF"
+
+
 def test_site_rule_prefers_exact_host(tmp_path: Path):
     store = SettingsStore(tmp_path / "settings.json")
     store.update(
@@ -288,6 +722,8 @@ async def test_http_translate_requires_token_and_streams(tmp_path: Path):
     model = tmp_path / "model.gguf"
     model.write_bytes(b"gguf")
     state.models.mark_file("plamo-3-translate-0.8b-GGUF", model)
+    # 新規導入時の既定は GPU 推奨に変わるので、テストでは 0.8B を明示する。
+    state.settings.update({"active_translate_model": "plamo-3-translate-0.8b-GGUF"})
     app = create_app(state)
     async with TestClient(TestServer(app)) as client:
         denied = await client.get("/v1/status")
@@ -317,6 +753,9 @@ async def test_http_translate_requires_token_and_streams(tmp_path: Path):
         assert response.status == 200
         payload = await response.json()
         assert payload["text"] == "訳文"
+        assert payload["model_id"] == "plamo-3-translate-0.8b-GGUF"
+        assert payload["model_label"] == "PLaMo 3 Translate 0.8B"
+        assert payload["model_short"] == "0.8B"
         assert "<|plamo:tag|>dataset" in state.llama.prompts[0]
         models = await client.get("/v1/models", headers=headers)
         ids = [item["id"] for item in (await models.json())["models"]]
@@ -333,6 +772,8 @@ async def test_http_translate_requires_token_and_streams(tmp_path: Path):
         streamed = await client.post("/api/translate", headers=headers, json={"text": "Hello", "target_lang": "ja"})
         raw = await streamed.text()
         assert "event: delta" in raw and "訳文" in raw
+        done_line = [line for line in raw.splitlines() if line.startswith("data:") and "model_label" in line]
+        assert done_line and "PLaMo 3 Translate 0.8B" in done_line[0]
 
 
 @pytest.mark.asyncio
@@ -344,6 +785,8 @@ async def test_subtitle_socket_emits_final_caption(tmp_path: Path):
     model = tmp_path / "model.gguf"
     model.write_bytes(b"gguf")
     state.models.mark_file("plamo-3-translate-0.8b-GGUF", model)
+    # 新規導入時の既定は GPU 推奨に変わるので、テストでは 0.8B を明示する。
+    state.settings.update({"active_translate_model": "plamo-3-translate-0.8b-GGUF"})
     state.settings.update({"subtitle_backend": "segment-worker", "translate_interim": False})
 
     async def transcribe_pcm(pcm: bytes, sample_rate: int = 16000) -> str:

@@ -1,4 +1,5 @@
 import { DaemonClient, type DaemonEndpoint } from "../lib/daemon-client";
+import { applyActionAppearance } from "../lib/action-appearance";
 import { NATIVE_HOST_NAME } from "../lib/identity";
 import { effectiveSettings, hostShouldAutoTranslate } from "../lib/site-settings";
 import { LruTranslationCache, translationCacheKey, type CacheStorage } from "../lib/translation-cache";
@@ -24,6 +25,9 @@ let uiState: UiState = { connected: false, events: [] };
 let eventsSocket: WebSocket | null = null;
 let eventsReconnect: ReturnType<typeof setTimeout> | null = null;
 let lastProgressRefreshAt = 0;
+// モデル ID → 表示名/短い名前。ポップアップの見出しなど、キャッシュヒット時に
+// キャッシュキーに含まれる選択中モデルの名前を引くために使う (/v1/models から更新)。
+const modelNamesById = new Map<string, { label: string; short: string }>();
 const queue = new TranslationQueue(1);
 const cache = new LruTranslationCache(400, chromeStorage());
 const ports = new Set<chrome.runtime.Port>();
@@ -33,6 +37,8 @@ export default defineBackground(() => {
     registerMenus();
   });
   registerMenus();
+  // 設定画面を開く前から、ツールバーに使用中の翻訳モデルを出す。
+  void refreshUiState();
   chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => undefined);
   chrome.contextMenus.onClicked.addListener((info, tab) => {
     if (!tab?.id) return;
@@ -97,7 +103,7 @@ async function handleMessage(message: Record<string, unknown>, sender: chrome.ru
     case "install-runtime":
       return (await client()).postJson(`/v1/runtimes/${message.runtime}/install`, {});
     case "try-translate":
-      return translateText(String(message.text ?? ""), TRANSLATION_PRIORITY.selection, {});
+      return (await translateText(String(message.text ?? ""), TRANSLATION_PRIORITY.selection, {})).text;
     case "effective-settings":
       return effectiveSettings(await loadSettings(), String(message.host ?? ""));
     case "should-auto-translate":
@@ -117,7 +123,7 @@ async function handleMessage(message: Record<string, unknown>, sender: chrome.ru
 
 async function handleTranslatePort(port: chrome.runtime.Port, job: TranslateJob): Promise<void> {
   try {
-    const text = await queue.enqueue(job.priority, () =>
+    const result = await queue.enqueue(job.priority, () =>
       translateText(job.text, job.priority, {
         sourceLang: job.sourceLang,
         targetLang: job.targetLang,
@@ -125,7 +131,7 @@ async function handleTranslatePort(port: chrome.runtime.Port, job: TranslateJob)
         onDelta: (partial) => port.postMessage({ type: "delta", requestId: job.requestId, text: partial }),
       }),
     );
-    port.postMessage({ type: "done", requestId: job.requestId, text });
+    port.postMessage({ type: "done", requestId: job.requestId, text: result.text, modelShort: result.modelShort });
   } catch (error) {
     port.postMessage({
       type: "error",
@@ -144,7 +150,7 @@ async function translateText(
     context?: string;
     onDelta?: (text: string) => void;
   },
-): Promise<string> {
+): Promise<{ text: string; modelShort: string | null }> {
   const settings = await loadSettings();
   const sourceLang = options.sourceLang ?? settings.source_lang;
   const targetLang = options.targetLang ?? settings.target_lang;
@@ -160,7 +166,8 @@ async function translateText(
   const cached = await cache.get(key);
   if (cached) {
     options.onDelta?.(cached);
-    return cached;
+    // キャッシュキーには訳したモデルの ID が含まれているので、その名前を出す。
+    return { text: cached, modelShort: modelNamesById.get(settings.active_translate_model)?.short ?? null };
   }
   const daemon = await client();
   const translated = await daemon.translate(
@@ -175,8 +182,8 @@ async function translateText(
     },
     (partial) => options.onDelta?.(partial),
   );
-  await cache.set(key, translated);
-  return translated;
+  await cache.set(key, translated.text);
+  return { text: translated.text, modelShort: translated.modelShort };
 }
 
 async function updateSettings(patch: Partial<Settings>): Promise<Settings> {
@@ -262,6 +269,12 @@ async function refreshUiState(): Promise<void> {
       about,
       events: uiState.events,
     };
+    modelNamesById.clear();
+    for (const row of models.models) {
+      if (row.display_name || row.short_name) {
+        modelNamesById.set(row.id, { label: row.display_name ?? row.id, short: row.short_name ?? row.id });
+      }
+    }
     await chrome.storage.local.set({ settings });
     ensureEventsSocket();
   } catch (error) {
@@ -272,6 +285,7 @@ async function refreshUiState(): Promise<void> {
       settings: uiState.settings,
     };
   }
+  await applyActionAppearance(uiState);
   pushUiState();
 }
 
@@ -342,9 +356,27 @@ async function startSubtitles(senderTabId?: number): Promise<{ ok: true }> {
     token: endpoint?.token,
     tabId: tab.id,
   });
-  void daemon;
   const settings = await loadSettings();
-  await chrome.tabs.sendMessage(tab.id, { type: "subtitle-session", active: true, style: settings.subtitle_style });
+  // 字幕の開始時に数秒だけ「音声認識 <名前> → 翻訳 <名前>」を出す。表示は任意情報
+  // なので、取れなければ字幕だけを始める。
+  let models: { asr?: string; translate?: string } = {};
+  try {
+    const status = await daemon.getJson<{
+      current?: { asr?: { selected?: { label?: string } }; translate?: { selected?: { label?: string } } };
+    }>("/v1/status");
+    models = {
+      asr: status.current?.asr?.selected?.label,
+      translate: status.current?.translate?.selected?.label,
+    };
+  } catch {
+    models = {};
+  }
+  await chrome.tabs.sendMessage(tab.id, {
+    type: "subtitle-session",
+    active: true,
+    style: settings.subtitle_style,
+    models,
+  });
   return { ok: true };
 }
 

@@ -64,6 +64,42 @@ export interface ModelRow {
   quant?: string;
   active?: boolean;
   path?: string;
+  display_name?: string;
+  short_name?: string;
+  runtime?: string;
+}
+
+export interface CurrentModelIdentity {
+  id: string;
+  label: string;
+  quant: string;
+  short_label: string;
+}
+
+export interface TranslateCurrent {
+  selected: CurrentModelIdentity;
+  loaded: { id: string } | null;
+  state: string;
+  backend: string | null;
+  backend_error: string | null;
+  context_size: number | null;
+  n_gpu_layers: number | null;
+  parallel: number | null;
+}
+
+export interface AsrCurrent {
+  selected: CurrentModelIdentity;
+  runtime: string;
+  subtitle_pipeline: string;
+  loaded: { id: string } | null;
+  state: string;
+  device: string;
+  restart_required: boolean;
+}
+
+export interface CurrentModels {
+  translate: TranslateCurrent;
+  asr: AsrCurrent;
 }
 
 export interface DaemonStatus {
@@ -83,6 +119,7 @@ export interface DaemonStatus {
     n_gpu_layers: number;
   };
   llama: { state: string; model_id: string | null; port: number | null };
+  current?: CurrentModels;
   active_sessions: { subtitles: number };
 }
 

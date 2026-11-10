@@ -1,6 +1,6 @@
 import { useEffect, useState } from "preact/hooks";
 import { TRANSLATION_LANGUAGES } from "../lib/languages";
-import type { ModelRow, Settings, UiState } from "../lib/types";
+import type { AsrCurrent, CurrentModels, ModelRow, Settings, TranslateCurrent, UiState } from "../lib/types";
 
 interface LicenseView {
   name: string;
@@ -16,6 +16,13 @@ interface CommandView {
 }
 
 const empty: UiState = { connected: false, events: [] };
+
+const MODEL_KIND_ORDER = ["translate", "asr", "vad"] as const;
+const MODEL_KIND_LABELS: Record<string, string> = {
+  translate: "翻訳",
+  asr: "音声認識",
+  vad: "発話区間検出",
+};
 
 export function SettingsApp() {
   const [state, setState] = useState<UiState>(empty);
@@ -45,7 +52,7 @@ export function SettingsApp() {
   }, []);
 
   const settings = state.settings;
-  const port = state.status?.llama.port ?? state.status?.suggestion.model_id;
+  const current = state.status?.current;
 
   async function save(patch: Partial<Settings>): Promise<void> {
     await chrome.runtime.sendMessage({ type: "update-settings", settings: patch });
@@ -61,16 +68,15 @@ export function SettingsApp() {
   return (
     <main class="app">
       <header class="signal">
-        <div class="signal-path">
-          <span class={state.connected ? "dot live" : "dot"} />
-          <span>拡張</span>
-          <span>→</span>
-          <span>127.0.0.1</span>
-          <span>→</span>
-          <span>{state.status?.llama.state ?? "未接続"}</span>
-          <span class="stamp">{state.connected ? `:${state.status?.llama.port ?? "—"}` : "切断"}</span>
-        </div>
-        <p class="note">{state.error || state.status?.suggestion.reason || "コンパニオンの起動を待っています。"}</p>
+        {state.connected && current ? (
+          <CurrentModelsPanel current={current} models={state.models ?? []} suggestion={state.status?.suggestion} onChange={() => void reload()} />
+        ) : (
+          <div class="signal-path">
+            <span class={state.connected ? "dot live" : "dot"} />
+            <span>{state.connected ? "コンパニオンに接続しました" : "未接続"}</span>
+          </div>
+        )}
+        <p class="note">{state.error || (!state.connected ? "コンパニオンの起動を待っています。" : "")}</p>
       </header>
 
       <section>
@@ -125,11 +131,26 @@ export function SettingsApp() {
 
       <section>
         <h2>モデル</h2>
-        <div class="models">
-          {(state.models ?? []).map((model) => (
-            <ModelLine key={model.id} model={model} onChange={() => void reload()} />
-          ))}
-        </div>
+        {MODEL_KIND_ORDER.map((kind) => {
+          const rows = (state.models ?? []).filter((model) => model.kind === kind);
+          if (!rows.length) return null;
+          return (
+            <div class="models" key={kind}>
+              <h3>{MODEL_KIND_LABELS[kind]}</h3>
+              {rows.map((model) => (
+                <ModelLine
+                  key={model.id}
+                  model={model}
+                  suggested={model.id === state.status?.suggestion.model_id}
+                  onChange={() => void reload()}
+                />
+              ))}
+            </div>
+          );
+        })}
+        {(state.models ?? []).filter((model) => !MODEL_KIND_ORDER.includes(model.kind as (typeof MODEL_KIND_ORDER)[number])).map((model) => (
+          <ModelLine key={model.id} model={model} suggested={false} onChange={() => void reload()} />
+        ))}
         {(state.events ?? []).slice(-3).map((event, index) => (
           <p class="note" key={`${event.at ?? index}-${event.type}`}>
             {event.type}
@@ -176,20 +197,12 @@ export function SettingsApp() {
       {settings && (
         <section>
           <h2>字幕と音声認識</h2>
+          {/* 音声認識の選択はモデル一覧の「使う」に統一し、ここでは読み取り専用。 */}
+          <p class="note">
+            音声認識モデル: {current?.asr.selected.label ?? settings.active_asr_model}
+            {current?.asr.restart_required ? "（次の字幕開始時に切り替え）" : ""} — モデル一覧の「使う」で切り替えます
+          </p>
           <div class="inline">
-            <label>エンジン
-              <select value={settings.asr_engine} onChange={(event) => void save({ asr_engine: (event.target as HTMLSelectElement).value as Settings["asr_engine"] })}>
-                <option value="haas">Haas-ja（日本語）</option>
-                <option value="whisper">whisper.cpp（多言語）</option>
-                <option value="qwen3-asr">Qwen3-ASR（多言語・speech.cpp）</option>
-              </select>
-            </label>
-            <label>whisper モデル
-              <select value={settings.whisper_model} onChange={(event) => void save({ whisper_model: (event.target as HTMLSelectElement).value })}>
-                <option value="whisper-base">base（CPU 疎通）</option>
-                <option value="whisper-large-v3-turbo">large-v3-turbo</option>
-              </select>
-            </label>
             <label>字幕位置
               <select value={settings.subtitle_style.position} onChange={(event) => void save({ subtitle_style: { ...settings.subtitle_style, position: (event.target as HTMLSelectElement).value as "top" | "bottom" } })}>
                 <option value="bottom">下</option>
@@ -257,15 +270,125 @@ export function SettingsApp() {
         <p class="note">{state.about?.web_store.reason}</p>
         <p class="note">{state.about?.windows_haas.reason}</p>
         <p class="note">{state.about?.multilingual_asr.reason}</p>
-        <p class="note">経路の印: {String(port ?? "—")}</p>
       </section>
     </main>
   );
 }
 
-function ModelLine({ model, onChange }: { model: ModelRow; onChange: () => void }) {
+// 選択中のモデルは「使用中」、Runtime に読み込まれているモデルは「稼働中」。
+function translateStateLabel(translate: TranslateCurrent): string {
+  if (translate.state === "ready") return "稼働中";
+  if (translate.state === "starting") return "起動中";
+  if (translate.state === "not_downloaded") return "未ダウンロード";
+  return "待機中（初回利用時に起動）";
+}
+
+function asrStateLabel(asr: AsrCurrent): string {
+  if (asr.restart_required) return "次の字幕開始時に切り替え";
+  if (asr.state === "ready") return "稼働中";
+  if (asr.state === "not_downloaded") return "未ダウンロード";
+  return "待機中（字幕開始時に起動）";
+}
+
+function backendLabel(backend: string | null): string {
+  if (!backend) return "";
+  return backend.toUpperCase();
+}
+
+function deviceLabel(device: string): string {
+  return device === "gpu" ? "GPU" : device.toUpperCase();
+}
+
+function quantLabel(quant: string | undefined): string {
+  return quant && quant !== "custom" ? ` · ${quant}` : "";
+}
+
+function CurrentModelsPanel({
+  current,
+  models,
+  suggestion,
+  onChange,
+}: {
+  current: CurrentModels;
+  models: ModelRow[];
+  suggestion?: { model_id: string; reason: string };
+  onChange: () => void;
+}) {
+  const [switching, setSwitching] = useState(false);
+  const [switchError, setSwitchError] = useState("");
+  const translate = current.translate;
+  const asr = current.asr;
+  const switchingModel = translate.loaded && translate.loaded.id !== translate.selected.id;
+  const translateDetail = [
+    translateStateLabel(translate),
+    translate.backend ? `${backendLabel(translate.backend)} · ctx ${translate.context_size ?? "—"} · 並列 ${translate.parallel ?? "—"}` : "",
+    translate.backend_error ?? "",
+  ]
+    .filter(Boolean)
+    .join(" · ");
+  const asrDetail = [asrStateLabel(asr), deviceLabel(asr.device), asr.runtime].filter(Boolean).join(" · ");
+  const suggestedRow = suggestion ? models.find((model) => model.id === suggestion.model_id) : undefined;
+  const suggestedReady = suggestedRow?.status === "ready" || suggestedRow?.status === "running";
+  const suggestedActive = Boolean(suggestedRow?.active);
+
+  async function switchToSuggested(): Promise<void> {
+    if (!suggestion) return;
+    setSwitching(true);
+    setSwitchError("");
+    try {
+      const response = (await chrome.runtime.sendMessage({ type: "activate-model", modelId: suggestion.model_id })) as
+        | { error?: string }
+        | undefined;
+      if (response && typeof response === "object" && response.error) {
+        setSwitchError(response.error);
+        return;
+      }
+      onChange();
+    } finally {
+      setSwitching(false);
+    }
+  }
+
+  return (
+    <div class="current-models">
+      <div class="current-line">
+        <span class={translate.state === "ready" ? "dot live" : "dot"} />
+        <strong>翻訳</strong>
+        <span>{translate.selected.label}{quantLabel(translate.selected.quant)}</span>
+        {switchingModel && <span class="badge suggested">切り替え中</span>}
+      </div>
+      <p class="note">{translateDetail}</p>
+      <div class="current-line">
+        <span class={asr.state === "ready" ? "dot live" : "dot"} />
+        <strong>字幕</strong>
+        <span>{asr.selected.label}{quantLabel(asr.selected.quant)}</span>
+      </div>
+      <p class="note">{asrDetail}</p>
+      {suggestion && suggestedRow && (
+        <div class="inline">
+          <span class="note">
+            推奨: {suggestedRow.display_name ?? suggestion.model_id}{quantLabel(suggestedRow.quant)} — {suggestion.reason}
+          </span>
+          {suggestedReady && !suggestedActive && (
+            <button type="button" disabled={switching} onClick={() => void switchToSuggested()}>
+              {switching ? "切り替え中…" : "推奨に切り替え"}
+            </button>
+          )}
+          {!suggestedReady && !suggestedActive && (
+            <span class="note">未ダウンロードです。一覧の「推奨」の行からダウンロードできます。</span>
+          )}
+          {switchError && <span class="fault">{switchError}</span>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ModelLine({ model, suggested, onChange }: { model: ModelRow; suggested: boolean; onChange: () => void }) {
   const [license, setLicense] = useState<LicenseView | null>(null);
   const [licenseError, setLicenseError] = useState("");
+  const [actionError, setActionError] = useState("");
+  const [busyAction, setBusyAction] = useState("");
 
   async function showLicense(): Promise<void> {
     setLicenseError("");
@@ -277,11 +400,57 @@ function ModelLine({ model, onChange }: { model: ModelRow; onChange: () => void 
     setLicense(response);
   }
 
+  // 「使う」は llama-server の起動待ち（31B では数秒以上）、「ダウンロード」は開始まで
+  // 時間がかかる。押している間は行内に状況を出し、background が返す { error } を捨てない。
+  async function run(action: "consent" | "download-model" | "activate-model"): Promise<void> {
+    setBusyAction(action);
+    setActionError("");
+    try {
+      const response = (await chrome.runtime.sendMessage({ type: action, modelId: model.id })) as
+        | { error?: string }
+        | undefined;
+      if (response && typeof response === "object" && response.error) {
+        setActionError(response.error);
+        return;
+      }
+      onChange();
+    } finally {
+      setBusyAction("");
+    }
+  }
+
+  const busyNote = busyAction === "activate-model" ? "切り替え中…" : busyAction === "download-model" ? "ダウンロードを開始しています…" : busyAction === "consent" ? "記録しています…" : "";
+  // 選択中は「使用中」、Runtime に読み込まれているモデルは「稼働中」。
+  const active = Boolean(model.active);
+  const running = model.status === "running";
+  const usable = model.status === "ready" || running;
+  const statusText = running
+    ? "稼働中"
+    : model.status === "ready"
+      ? "ダウンロード済み"
+      : model.status === "downloading"
+        ? `ダウンロード中 ${Math.round((model.progress ?? 0) * 100)}%`
+        : model.status === "error"
+          ? "ダウンロードに失敗しました"
+          : "未ダウンロード";
+  // 発話区間検出は選ぶ対象ではなく、字幕が内部で使う。
+  const selectable = model.kind !== "vad";
+
   return (
-    <div class="model">
+    <div class={active ? "model active" : "model"}>
       <div>
-        <strong>{model.id}</strong>
-        <div class="note">{model.note} / {model.status}{model.progress ? ` ${Math.round((model.progress ?? 0) * 100)}%` : ""}</div>
+        <div class="model-title">
+          <strong>{model.display_name ?? model.id}</strong>
+          {active && <span class="badge active">使用中</span>}
+          {suggested && !active && <span class="badge suggested">推奨</span>}
+        </div>
+        <div class="note">
+          {model.id}{model.quant && model.quant !== "custom" ? ` · ${model.quant}` : ""} · {statusText}
+          {model.size_gb ? ` · ${model.size_gb}GB` : ""}
+        </div>
+        {model.note && <div class="note">{model.note}</div>}
+        {busyNote && <div class="note">{busyNote}</div>}
+        {actionError && <div class="fault">{actionError}</div>}
         {license && (
           <div class="note">
             <div>{license.name}</div>
@@ -293,14 +462,23 @@ function ModelLine({ model, onChange }: { model: ModelRow; onChange: () => void 
         {licenseError && <div class="fault">{licenseError}</div>}
       </div>
       <div class="inline">
-        {!model.consented && <button type="button" onClick={() => void showLicense()}>ライセンスを見る</button>}
+        {!model.consented && <button type="button" disabled={Boolean(busyAction)} onClick={() => void showLicense()}>ライセンスを見る</button>}
         {!model.consented && license && (
-          <button type="button" onClick={() => void chrome.runtime.sendMessage({ type: "consent", modelId: model.id }).then(onChange)}>同意して記録する</button>
+          <button type="button" disabled={Boolean(busyAction)} onClick={() => void run("consent")}>同意して記録する</button>
         )}
-        {model.consented && model.status !== "ready" && model.status !== "running" && (
-          <button type="button" onClick={() => void chrome.runtime.sendMessage({ type: "download-model", modelId: model.id }).then(onChange)}>ダウンロード</button>
+        {model.consented && !usable && (
+          <button type="button" disabled={Boolean(busyAction)} onClick={() => void run("download-model")}>ダウンロード</button>
         )}
-        <button type="button" onClick={() => void chrome.runtime.sendMessage({ type: "activate-model", modelId: model.id }).then(onChange)}>使う</button>
+        {selectable && !active && (
+          <button
+            type="button"
+            disabled={Boolean(busyAction) || !usable}
+            title={usable ? undefined : "未ダウンロードです。ダウンロードしてから選べます。"}
+            onClick={() => void run("activate-model")}
+          >
+            使う
+          </button>
+        )}
       </div>
     </div>
   );
