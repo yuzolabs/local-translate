@@ -1,4 +1,4 @@
-"""VRAM tier suggestions. 16 GB offers both 31B Q3 and 8B Q4; the caller picks."""
+"""VRAM tier suggestions. 16 GB offers both 31B Q2 and 8B Q4; the caller picks."""
 
 from __future__ import annotations
 
@@ -43,8 +43,8 @@ def suggest_runtime(gpu: GpuInfo, idle_timeout_sec: int = 600) -> RuntimeSuggest
             8192,
             99,
             2,
-            "VRAM 16GB では 8B Q4_K_M、またはコンテキストを縮めた 31B Q3_K_M を選べます。",
-            ("plamo-3-translate-31b-GGUF-Q3_K_M",),
+            "VRAM 16GB では 8B Q4_K_M、または 31B Q2_K を選べます。",
+            ("plamo-3-translate-31b-GGUF-Q2_K",),
         )
     if vram_reaches_tier(vram, 12):
         return RuntimeSuggestion(

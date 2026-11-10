@@ -177,13 +177,14 @@ def test_vram_tiers():
     assert big.model_id == "plamo-3-translate-31b-GGUF-Q4_K_M"
     assert big.context_size == 16384
     mid = suggest_runtime(GpuInfo("cuda", "RTX", 16384, 14000, False, 32000, True, True))
-    assert "plamo-3-translate-31b-GGUF-Q3_K_M" in mid.alternatives
+    assert "plamo-3-translate-31b-GGUF-Q2_K" in mid.alternatives
     reported_16gb = suggest_runtime(GpuInfo("cuda", "RTX 4070 Ti SUPER", 16376, 14000, False, 32000, True, True))
     assert reported_16gb.model_id == "plamo-3-translate-8b-GGUF"
     assert reported_16gb.context_size == 8192
-    assert "plamo-3-translate-31b-GGUF-Q3_K_M" in reported_16gb.alternatives
+    assert "plamo-3-translate-31b-GGUF-Q2_K" in reported_16gb.alternatives
+    assert "plamo-3-translate-31b-GGUF-Q3_K_M" not in reported_16gb.alternatives
     just_under = suggest_runtime(GpuInfo("cuda", "RTX", 16 * 1024 - 513, 10000, False, 32000, True, True))
-    assert "plamo-3-translate-31b-GGUF-Q3_K_M" not in just_under.alternatives
+    assert "plamo-3-translate-31b-GGUF-Q2_K" not in just_under.alternatives
     small = suggest_runtime(GpuInfo("cpu", "CPU", None, None, False, 3000, False, False))
     assert small.model_id == "plamo-3-translate-0.8b-GGUF"
     assert small.n_gpu_layers == 0
