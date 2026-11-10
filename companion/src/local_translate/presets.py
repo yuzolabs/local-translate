@@ -16,6 +16,9 @@ class ModelPreset:
     license_id: str
     alias: str
     runtime: str
+    # 人間が画面で読む名前。拡張は ID を加工せず、この表示名と短い名前をそのまま出す。
+    display_name: str
+    short_name: str
     catalog_name: str = ""
     note: str = ""
 
@@ -31,6 +34,8 @@ PRESETS: tuple[ModelPreset, ...] = (
         "plamo-community",
         "plamo-3-translate",
         "llama.cpp",
+        "PLaMo 3 Translate 0.8B",
+        "0.8B",
         note="CPU と統合 GPU の開発標準",
     ),
     ModelPreset(
@@ -43,6 +48,8 @@ PRESETS: tuple[ModelPreset, ...] = (
         "plamo-community",
         "plamo-3-translate",
         "llama.cpp",
+        "PLaMo 3 Translate 2B",
+        "2B",
         note="低 VRAM",
     ),
     ModelPreset(
@@ -55,6 +62,8 @@ PRESETS: tuple[ModelPreset, ...] = (
         "plamo-community",
         "plamo-3-translate",
         "llama.cpp",
+        "PLaMo 3 Translate 8B",
+        "8B",
         note="8GB 以上",
     ),
     ModelPreset(
@@ -67,6 +76,8 @@ PRESETS: tuple[ModelPreset, ...] = (
         "plamo-community",
         "plamo-3-translate",
         "llama.cpp",
+        "PLaMo 3 Translate 31B",
+        "31B",
         note="24GB 以上",
     ),
     ModelPreset(
@@ -79,6 +90,8 @@ PRESETS: tuple[ModelPreset, ...] = (
         "plamo-community",
         "plamo-3-translate",
         "llama.cpp",
+        "PLaMo 3 Translate 31B",
+        "31B",
         note="16GB ではコンテキスト縮小とセットで選ぶ",
     ),
     ModelPreset(
@@ -91,6 +104,8 @@ PRESETS: tuple[ModelPreset, ...] = (
         "plamo-community",
         "plamo-3-translate",
         "llama.cpp",
+        "PLaMo 3 Translate 31B",
+        "31B",
         note="最小の 31B。精度は他の量子化より落ちる",
     ),
     ModelPreset(
@@ -103,6 +118,8 @@ PRESETS: tuple[ModelPreset, ...] = (
         "apache-2.0",
         "haas-ja-v1.0",
         "speech.cpp",
+        "Haas-ja v1.0",
+        "Haas",
         catalog_name="haas-ja-v1.0",
         note="日本語 ASR の既定。speech.cpp がカタログの SHA-256 を検証して取得する",
     ),
@@ -116,6 +133,8 @@ PRESETS: tuple[ModelPreset, ...] = (
         "apache-2.0",
         "haas-ja-v1.0",
         "speech.cpp",
+        "Haas-ja v1.0 F16",
+        "F16",
         catalog_name="haas-ja-v1.0:f16",
         note="Q8_0 との品質比較用",
     ),
@@ -129,6 +148,8 @@ PRESETS: tuple[ModelPreset, ...] = (
         "mit",
         "silero-vad",
         "speech.cpp",
+        "Silero VAD",
+        "VAD",
         catalog_name="silero-vad",
         note="字幕の発話区間検出",
     ),
@@ -142,6 +163,8 @@ PRESETS: tuple[ModelPreset, ...] = (
         "apache-2.0",
         "qwen3-asr-0.6b",
         "speech.cpp",
+        "Qwen3 ASR 0.6B",
+        "Qwen",
         catalog_name="qwen3-asr-0.6b",
         note="speech.cpp 上の多言語代替",
     ),
@@ -155,6 +178,8 @@ PRESETS: tuple[ModelPreset, ...] = (
         "mit",
         "whisper-large-v3-turbo",
         "whisper.cpp",
+        "Whisper large-v3-turbo",
+        "Wlv3",
         note="多言語 ASR の採用候補",
     ),
     ModelPreset(
@@ -167,12 +192,20 @@ PRESETS: tuple[ModelPreset, ...] = (
         "mit",
         "whisper-base",
         "whisper.cpp",
+        "Whisper base",
+        "Base",
         note="CPU 機で多言語経路を疎通するための小さいモデル",
     ),
 )
 
 PRESET_BY_ID = {preset.model_id: preset for preset in PRESETS}
+# speech.cpp のカタログ名 (speech serve / worker の引数) からプリセットへ戻す写像。
+PRESET_BY_CATALOG = {preset.catalog_name: preset for preset in PRESETS if preset.catalog_name}
 
 
 def get_preset(model_id: str) -> ModelPreset | None:
     return PRESET_BY_ID.get(model_id)
+
+
+def preset_for_catalog(catalog_name: str) -> ModelPreset | None:
+    return PRESET_BY_CATALOG.get(catalog_name)

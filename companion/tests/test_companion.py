@@ -23,6 +23,7 @@ from local_translate.languages import LANGUAGES
 from local_translate.llama_server import LLAMA_ARGV_FLAGS, build_llama_server_argv, pick_free_port
 from local_translate.nm_framing import read_native_message, write_native_message
 from local_translate.paths import AppPaths, default_app_paths, resolve_data_dir, resolve_state_dir
+from local_translate.presets import PRESETS
 from local_translate.process_lock import ProcessLock
 from local_translate.prompt_builder import build_pfml3_prompt
 from local_translate.runtime_fetch import (
@@ -76,6 +77,34 @@ def test_languages_cover_the_model_card():
     assert len(LANGUAGES) == 53
     assert dict(LANGUAGES)["ja"] == "日本語"
     assert dict(LANGUAGES)["zh-hans"] != dict(LANGUAGES)["zh-hant"]
+
+
+def test_every_preset_has_a_display_name_and_a_short_badge_name():
+    # 拡張は ID を加工しない。全プリセットが表示名と 4 文字以内の短い名前を持つ。
+    for preset in PRESETS:
+        assert preset.display_name.strip(), f"{preset.model_id} に表示名がありません"
+        assert len(preset.short_name) <= 4, f"{preset.short_name} は 4 文字以内ください ({preset.model_id})"
+        assert preset.short_name.strip(), f"{preset.model_id} の短い名前が空です"
+    ids = {preset.model_id for preset in PRESETS}
+    assert "Haas-ja-v1.0" in ids and "whisper-large-v3-turbo" in ids
+
+
+def test_registry_rows_carry_display_names(tmp_path: Path):
+    from local_translate.model_registry import ModelRegistry
+
+    registry = ModelRegistry(tmp_path / "models.json", tmp_path / "models")
+    gguf = tmp_path / "mine.gguf"
+    gguf.write_bytes(b"gguf")
+    registry.register_local_gguf("my-model", gguf, alias="作業用モデル", sha256="abc")
+    rows = registry.list_models("plamo-3-translate-8b-GGUF", "Haas-ja-v1.0", None)
+    by_id = {row["id"]: row for row in rows}
+    assert by_id["plamo-3-translate-8b-GGUF"]["display_name"] == "PLaMo 3 Translate 8B"
+    assert by_id["plamo-3-translate-8b-GGUF"]["short_name"] == "8B"
+    assert by_id["Haas-ja-v1.0"]["display_name"] == "Haas-ja v1.0"
+    assert by_id["my-model"]["display_name"] == "作業用モデル"
+    assert by_id["my-model"]["short_name"] == "GGUF"
+    assert by_id["plamo-3-translate-8b-GGUF"]["active"] is True
+    assert by_id["my-model"]["active"] is False
 
 
 def test_pfml3_matches_the_model_card_examples():
