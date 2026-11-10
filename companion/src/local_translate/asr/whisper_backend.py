@@ -38,7 +38,7 @@ class WhisperCppBackend:
                 "--output-file",
                 str(directory / "utterance"),
             ]
-            if language and language != "auto":
+            if language:
                 argv.extend(["-l", language])
             process = await create_hidden_subprocess(
                 *argv,

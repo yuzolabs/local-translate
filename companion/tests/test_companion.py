@@ -1031,6 +1031,32 @@ def test_data_dir_is_private_after_ensure(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_whisper_passes_auto_language_to_the_cli(tmp_path: Path, monkeypatch):
+    from local_translate.asr.whisper_backend import WhisperCppBackend
+
+    seen: dict[str, tuple] = {}
+
+    class Finished:
+        returncode = 0
+
+        async def communicate(self):
+            return b"", b""
+
+    async def fake_exec(*argv, **kwargs):
+        del kwargs
+        seen["argv"] = argv
+        return Finished()
+
+    monkeypatch.setattr("local_translate.asr.whisper_backend.create_hidden_subprocess", fake_exec)
+    model = tmp_path / "whisper.bin"
+    model.write_bytes(b"ggml")
+    text = await WhisperCppBackend(sys.executable, model).transcribe_pcm(b"\x00\x00" * 16, language="auto")
+    assert text == ""
+    argv = seen["argv"]
+    assert argv[argv.index("-l") + 1] == "auto"
+
+
+@pytest.mark.asyncio
 async def test_whisper_work_files_are_removed_even_when_transcription_fails(tmp_path: Path):
     from local_translate.asr.whisper_backend import WhisperCppBackend
     from local_translate.errors import CompanionError
