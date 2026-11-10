@@ -1,6 +1,6 @@
 import { useEffect, useState } from "preact/hooks";
 import { TRANSLATION_LANGUAGES } from "../lib/languages";
-import type { ModelRow, Settings, UiState } from "../lib/types";
+import type { AsrCurrent, CurrentModels, ModelRow, Settings, TranslateCurrent, UiState } from "../lib/types";
 
 interface LicenseView {
   name: string;
@@ -52,7 +52,7 @@ export function SettingsApp() {
   }, []);
 
   const settings = state.settings;
-  const port = state.status?.llama.port ?? state.status?.suggestion.model_id;
+  const current = state.status?.current;
 
   async function save(patch: Partial<Settings>): Promise<void> {
     await chrome.runtime.sendMessage({ type: "update-settings", settings: patch });
@@ -68,16 +68,15 @@ export function SettingsApp() {
   return (
     <main class="app">
       <header class="signal">
-        <div class="signal-path">
-          <span class={state.connected ? "dot live" : "dot"} />
-          <span>拡張</span>
-          <span>→</span>
-          <span>127.0.0.1</span>
-          <span>→</span>
-          <span>{state.status?.llama.state ?? "未接続"}</span>
-          <span class="stamp">{state.connected ? `:${state.status?.llama.port ?? "—"}` : "切断"}</span>
-        </div>
-        <p class="note">{state.error || state.status?.suggestion.reason || "コンパニオンの起動を待っています。"}</p>
+        {state.connected && current ? (
+          <CurrentModelsPanel current={current} models={state.models ?? []} suggestion={state.status?.suggestion} onChange={() => void reload()} />
+        ) : (
+          <div class="signal-path">
+            <span class={state.connected ? "dot live" : "dot"} />
+            <span>{state.connected ? "コンパニオンに接続しました" : "未接続"}</span>
+          </div>
+        )}
+        <p class="note">{state.error || (!state.connected ? "コンパニオンの起動を待っています。" : "")}</p>
       </header>
 
       <section>
@@ -279,9 +278,117 @@ export function SettingsApp() {
         <p class="note">{state.about?.web_store.reason}</p>
         <p class="note">{state.about?.windows_haas.reason}</p>
         <p class="note">{state.about?.multilingual_asr.reason}</p>
-        <p class="note">経路の印: {String(port ?? "—")}</p>
       </section>
     </main>
+  );
+}
+
+// 選択中のモデルは「使用中」、Runtime に読み込まれているモデルは「稼働中」。
+function translateStateLabel(translate: TranslateCurrent): string {
+  if (translate.state === "ready") return "稼働中";
+  if (translate.state === "starting") return "起動中";
+  if (translate.state === "not_downloaded") return "未ダウンロード";
+  return "待機中（初回利用時に起動）";
+}
+
+function asrStateLabel(asr: AsrCurrent): string {
+  if (asr.restart_required) return "次の字幕開始時に切り替え";
+  if (asr.state === "ready") return "稼働中";
+  if (asr.state === "not_downloaded") return "未ダウンロード";
+  return "待機中（字幕開始時に起動）";
+}
+
+function backendLabel(backend: string | null): string {
+  if (!backend) return "";
+  return backend.toUpperCase();
+}
+
+function deviceLabel(device: string): string {
+  return device === "gpu" ? "GPU" : device.toUpperCase();
+}
+
+function quantLabel(quant: string | undefined): string {
+  return quant && quant !== "custom" ? ` · ${quant}` : "";
+}
+
+function CurrentModelsPanel({
+  current,
+  models,
+  suggestion,
+  onChange,
+}: {
+  current: CurrentModels;
+  models: ModelRow[];
+  suggestion?: { model_id: string; reason: string };
+  onChange: () => void;
+}) {
+  const [switching, setSwitching] = useState(false);
+  const [switchError, setSwitchError] = useState("");
+  const translate = current.translate;
+  const asr = current.asr;
+  const switchingModel = translate.loaded && translate.loaded.id !== translate.selected.id;
+  const translateDetail = [
+    translateStateLabel(translate),
+    translate.backend ? `${backendLabel(translate.backend)} · ctx ${translate.context_size ?? "—"} · 並列 ${translate.parallel ?? "—"}` : "",
+    translate.backend_error ?? "",
+  ]
+    .filter(Boolean)
+    .join(" · ");
+  const asrDetail = [asrStateLabel(asr), deviceLabel(asr.device), asr.runtime].filter(Boolean).join(" · ");
+  const suggestedRow = suggestion ? models.find((model) => model.id === suggestion.model_id) : undefined;
+  const suggestedReady = suggestedRow?.status === "ready" || suggestedRow?.status === "running";
+  const suggestedActive = Boolean(suggestedRow?.active);
+
+  async function switchToSuggested(): Promise<void> {
+    if (!suggestion) return;
+    setSwitching(true);
+    setSwitchError("");
+    try {
+      const response = (await chrome.runtime.sendMessage({ type: "activate-model", modelId: suggestion.model_id })) as
+        | { error?: string }
+        | undefined;
+      if (response && typeof response === "object" && response.error) {
+        setSwitchError(response.error);
+        return;
+      }
+      onChange();
+    } finally {
+      setSwitching(false);
+    }
+  }
+
+  return (
+    <div class="current-models">
+      <div class="current-line">
+        <span class={translate.state === "ready" ? "dot live" : "dot"} />
+        <strong>翻訳</strong>
+        <span>{translate.selected.label}{quantLabel(translate.selected.quant)}</span>
+        {switchingModel && <span class="badge suggested">切り替え中</span>}
+      </div>
+      <p class="note">{translateDetail}</p>
+      <div class="current-line">
+        <span class={asr.state === "ready" ? "dot live" : "dot"} />
+        <strong>字幕</strong>
+        <span>{asr.selected.label}{quantLabel(asr.selected.quant)}</span>
+      </div>
+      <p class="note">{asrDetail}</p>
+      {suggestion && suggestedRow && (
+        <div class="inline">
+          <span class="note">
+            推奨: {suggestedRow.display_name ?? suggestion.model_id}{quantLabel(suggestedRow.quant)} — {suggestion.reason}
+          </span>
+          {suggestedReady && !suggestedActive && (
+            <button type="button" disabled={switching} onClick={() => void switchToSuggested()}>
+              {switching ? "切り替え中…" : "推奨に切り替え"}
+            </button>
+          )}
+          {!suggestedReady && !suggestedActive && (
+            <span class="note">未ダウンロードです。一覧の「推奨」の行からダウンロードできます。</span>
+          )}
+          {switchError && <span class="fault">{switchError}</span>}
+        </div>
+      )}
+    </div>
   );
 }
 

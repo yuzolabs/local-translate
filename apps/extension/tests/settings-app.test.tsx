@@ -237,3 +237,145 @@ describe("settings app model list", () => {
     expect(document.body.textContent).toContain("未ダウンロード");
   });
 });
+
+describe("settings app current models header", () => {
+  function currentState(overrides: { translate?: Record<string, unknown>; asr?: Record<string, unknown> } = {}) {
+    return {
+      translate: {
+        selected: { id: "plamo-3-translate-8b-GGUF", label: "PLaMo 3 Translate 8B", quant: "Q4_K_M", short_label: "8B" },
+        loaded: null,
+        state: "stopped",
+        backend: "cuda",
+        backend_error: null,
+        context_size: 8192,
+        n_gpu_layers: 99,
+        parallel: 2,
+        ...overrides.translate,
+      },
+      asr: {
+        selected: { id: "Haas-ja-v1.0", label: "Haas-ja v1.0", quant: "Q8_0", short_label: "Haas" },
+        runtime: "speech.cpp",
+        subtitle_pipeline: "speech-serve",
+        loaded: null,
+        state: "stopped",
+        device: "gpu",
+        restart_required: false,
+        ...overrides.asr,
+      },
+    };
+  }
+
+  it("shows the selected translate and subtitle models with japanese states", async () => {
+    mock.handlers.set(
+      "get-state",
+      () =>
+        uiState({
+          status: {
+            version: "0",
+            gpu: { backend: "cuda", name: "RTX", vram_total_mb: 16376, experimental_igpu: false, available_ram_mb: 32000 },
+            suggestion: { model_id: "plamo-3-translate-8b-GGUF", reason: "VRAM 16GB", alternatives: [], context_size: 8192, n_gpu_layers: 99 },
+            llama: { state: "stopped", model_id: null, port: null },
+            current: currentState(),
+            active_sessions: { subtitles: 0 },
+          },
+        }),
+    );
+    await renderSettingsApp();
+    const header = document.querySelector("header.signal")!;
+    expect(header.textContent).toContain("翻訳");
+    expect(header.textContent).toContain("PLaMo 3 Translate 8B · Q4_K_M");
+    expect(header.textContent).toContain("待機中（初回利用時に起動）");
+    expect(header.textContent).toContain("CUDA · ctx 8192 · 並列 2");
+    expect(header.textContent).toContain("字幕");
+    expect(header.textContent).toContain("Haas-ja v1.0 · Q8_0");
+    expect(header.textContent).toContain("待機中（字幕開始時に起動） · GPU · speech.cpp");
+    // 推奨が使用中と同じなので切り替えボタンも案内も出ない。
+    expect(findButton("推奨に切り替え")).toBeUndefined();
+  });
+
+  it("offers switching to a downloaded suggestion and defers while running", async () => {
+    const activated: string[] = [];
+    mock.handlers.set(
+      "get-state",
+      () =>
+        uiState({
+          models: [
+            modelRow({}),
+            modelRow({ id: "plamo-3-translate-8b-GGUF", display_name: "PLaMo 3 Translate 8B", status: "ready" }),
+            modelRow({ id: "plamo-3-translate-31b-GGUF-Q2_K", display_name: "PLaMo 3 Translate 31B", status: "ready" }),
+          ],
+          status: {
+            version: "0",
+            gpu: { backend: "cuda", name: "RTX", vram_total_mb: 16376, experimental_igpu: false, available_ram_mb: 32000 },
+            suggestion: { model_id: "plamo-3-translate-8b-GGUF", reason: "VRAM 16GB", alternatives: [], context_size: 8192, n_gpu_layers: 99 },
+            llama: { state: "stopped", model_id: null, port: null },
+            current: currentState(),
+            active_sessions: { subtitles: 0 },
+          },
+        }),
+    );
+    mock.handlers.set("activate-model", (message) => {
+      activated.push(String(message.modelId));
+      return { status: "ready" };
+    });
+    await renderSettingsApp();
+    const header = document.querySelector("header.signal")!;
+    // 推奨は 8B（ダウンロード済み・非使用中）なので切り替えを提示する。
+    expect(header.textContent).toContain("推奨: PLaMo 3 Translate 8B");
+    (findButton("推奨に切り替え") as HTMLButtonElement).click();
+    await waitFor(() => activated.length === 1);
+    expect(activated).toEqual(["plamo-3-translate-8b-GGUF"]);
+  });
+
+  it("guides to download when the suggested model is missing", async () => {
+    mock.handlers.set(
+      "get-state",
+      () =>
+        uiState({
+          models: [modelRow({}), modelRow({ id: "plamo-3-translate-31b-GGUF-Q2_K", display_name: "PLaMo 3 Translate 31B", status: "missing", consented: false })],
+          status: {
+            version: "0",
+            gpu: { backend: "cuda", name: "RTX", vram_total_mb: 16376, experimental_igpu: false, available_ram_mb: 32000 },
+            suggestion: { model_id: "plamo-3-translate-31b-GGUF-Q2_K", reason: "VRAM 16GB では 8B Q4_K_M、または 31B Q2_K", alternatives: [], context_size: 8192, n_gpu_layers: 99 },
+            llama: { state: "stopped", model_id: null, port: null },
+            current: currentState(),
+            active_sessions: { subtitles: 0 },
+          },
+        }),
+    );
+    await renderSettingsApp();
+    expect(document.body.textContent).toContain("未ダウンロードです。一覧の「推奨」の行からダウンロードできます。");
+    expect(findButton("推奨に切り替え")).toBeUndefined();
+  });
+
+  it("marks a pending subtitle serve restart and backend errors", async () => {
+    mock.handlers.set(
+      "get-state",
+      () =>
+        uiState({
+          status: {
+            version: "0",
+            gpu: { backend: "cpu", name: "CPU", vram_total_mb: null, experimental_igpu: false, available_ram_mb: 8000 },
+            suggestion: { model_id: "plamo-3-translate-0.8b-GGUF", reason: "r", alternatives: [], context_size: 2048, n_gpu_layers: 0 },
+            llama: { state: "ready", model_id: "plamo-3-translate-8b-GGUF", port: 9 },
+            current: currentState({
+              translate: { state: "ready", backend: null, backend_error: "CUDA が検出できません", loaded: { id: "plamo-3-translate-0.8b-GGUF" } },
+              asr: { restart_required: true },
+            }),
+            active_sessions: { subtitles: 1 },
+          },
+        }),
+    );
+    await renderSettingsApp();
+    const header = document.querySelector("header.signal")!;
+    expect(header.textContent).toContain("CUDA が検出できません");
+    expect(header.textContent).toContain("次の字幕開始時に切り替え");
+    expect(header.textContent).toContain("切り替え中");
+  });
+
+  it("shows the disconnected state when the daemon is unreachable", async () => {
+    mock.handlers.set("get-state", () => ({ connected: false, events: [] }));
+    await renderSettingsApp();
+    expect(document.querySelector("header.signal")!.textContent).toContain("未接続");
+  });
+});
