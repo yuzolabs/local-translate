@@ -1,12 +1,33 @@
-# Windows setup for the companion. This script registers native messaging and
-# records the speech.cpp decision. It does not bundle model weights.
+# Windows setup for the companion. Syncs the virtualenv, then registers native messaging.
+# Registry registration changes HKCU, so it asks before writing unless -Yes is passed.
 param(
-    [Parameter(Mandatory = $true)]
-    [string]$HostPath
+    [string]$HostPath = "",
+    [switch]$Yes
 )
 
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
+if (-not $HostPath) {
+    $HostPath = Join-Path $root "companion\.venv\Scripts\local-translate-host.exe"
+}
+
+Push-Location (Join-Path $root "companion")
+try {
+    uv sync --all-groups
+} finally {
+    Pop-Location
+}
+if (-not (Test-Path $HostPath)) {
+    throw "ホスト実行ファイルがありません: $HostPath"
+}
+
+if (-not $Yes) {
+    $answer = Read-Host "HKCU に Native Messaging ホストを登録します。続行しますか? [y/N]"
+    if ($answer -notin @("y", "Y")) {
+        throw "登録を中止しました"
+    }
+}
+
 $state = Join-Path $env:LOCALAPPDATA "local-translate-extension"
 New-Item -ItemType Directory -Force -Path $state | Out-Null
 @(
