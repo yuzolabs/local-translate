@@ -1,8 +1,9 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { TRANSLATION_LANGUAGES } from "../lib/languages";
 import { extractPageBlocks } from "../lib/page-blocks";
 import { parseSseChunk } from "../lib/sse-parser";
 import { applySubtitleStyle, renderCaption, setSubtitleSession } from "../lib/subtitle-overlay";
+import { closeSelectionPopup, showSelectionPopup } from "../lib/selection-popup";
 import { effectiveSettings, hostShouldAutoTranslate, shouldStartAutoTranslate, siteRuleForHost } from "../lib/site-settings";
 import { LruTranslationCache, translationCacheKey, type CacheStorage } from "../lib/translation-cache";
 import { TranslationQueue } from "../lib/translation-queue";
@@ -180,5 +181,51 @@ describe("subtitle overlay", () => {
     expect(html).toContain("こんにちは");
     expect(html).not.toContain('class="orig"');
     setSubtitleSession(false);
+  });
+
+  it("shows the asr and translate model names for a few seconds at session start", () => {
+    vi.useFakeTimers();
+    try {
+      document.body.innerHTML = "";
+      setSubtitleSession(true, undefined, { asr: "Haas-ja v1.0", translate: "PLaMo 3 Translate 8B" });
+      const host = document.documentElement.querySelector("[data-lt-root]") as HTMLElement;
+      expect(host.shadowRoot!.innerHTML).toContain("音声認識 Haas-ja v1.0 → 翻訳 PLaMo 3 Translate 8B");
+      vi.advanceTimersByTime(4100);
+      expect(host.shadowRoot!.innerHTML).not.toContain("音声認識");
+      setSubtitleSession(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe("selection popup", () => {
+  it("appends the used model short name to the heading on completion", () => {
+    document.body.innerHTML = "";
+    const listeners: Array<(message: Record<string, unknown>) => void> = [];
+    const posted: unknown[] = [];
+    vi.stubGlobal("chrome", {
+      runtime: {
+        connect: () => ({
+          onMessage: { addListener: (listener) => listeners.push(listener) },
+          postMessage: (message) => posted.push(message),
+        }),
+      },
+    });
+    try {
+      showSelectionPopup("Hello", 10, 10);
+      const job = posted[0] as { requestId: string };
+      const host = document.documentElement.querySelector("[data-lt-root]") as HTMLElement;
+      const label = host.shadowRoot!.querySelector(".label")!;
+      expect(label.textContent).toBe("選択範囲");
+      for (const listener of listeners) {
+        listener({ type: "done", requestId: job.requestId, text: "こんにちは", modelShort: "8B" });
+      }
+      expect(label.textContent).toBe("選択範囲 · 8B");
+      expect((host.shadowRoot!.getElementById("body") as HTMLElement).textContent).toBe("こんにちは");
+      closeSelectionPopup();
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });

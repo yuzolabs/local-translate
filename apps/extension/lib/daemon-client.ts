@@ -47,7 +47,7 @@ export class DaemonClient {
       model_id?: string;
     },
     onDelta: (text: string) => void,
-  ): Promise<string> {
+  ): Promise<{ text: string; modelLabel: string | null; modelShort: string | null }> {
     const response = await fetch(this.url("/api/translate"), {
       method: "POST",
       headers: this.headers(true),
@@ -58,6 +58,8 @@ export class DaemonClient {
     const decoder = new TextDecoder();
     let buffer = "";
     let combined = "";
+    let modelLabel: string | null = null;
+    let modelShort: string | null = null;
     while (true) {
       const chunk = await reader.read();
       if (chunk.done) break;
@@ -65,15 +67,19 @@ export class DaemonClient {
       const parsed = parseSseChunk(buffer);
       buffer = parsed.rest;
       for (const event of parsed.events) {
-        const payload = JSON.parse(event.data) as { text?: string; message?: string };
+        const payload = JSON.parse(event.data) as { text?: string; message?: string; model_label?: string; model_short?: string };
         if (event.event === "delta" && payload.text) {
           combined += payload.text;
           onDelta(combined);
         }
+        if (event.event === "done") {
+          modelLabel = payload.model_label ?? null;
+          modelShort = payload.model_short ?? null;
+        }
         if (event.event === "error") throw new Error(payload.message ?? "翻訳に失敗しました");
       }
     }
-    return combined;
+    return { text: combined, modelLabel, modelShort };
   }
 
   subtitleSocket(onCaption: (caption: Caption) => void): WebSocket {
