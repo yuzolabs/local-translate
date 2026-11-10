@@ -55,10 +55,21 @@ def speech_asset_name(platform: str, backend: str) -> str:
     return f"speech-{SPEECH_CPP_VERSION}-linux-x64-cpu.zip"
 
 
-def whisper_asset_name(platform: str) -> str:
+def whisper_asset_name(platform: str, backend: str = "cpu") -> str:
+    """Windows CUDA uses its own zip, which already contains the CUDA runtime DLLs."""
+    if platform == "win32" and backend == "cuda":
+        return "whisper-bin-win-cuda-12.4.0-x64.zip"
     if platform == "win32":
-        return f"whisper-bin-x64.zip"
+        return "whisper-bin-x64.zip"
     return "whisper-bin-ubuntu-x64.tar.gz"
+
+
+def whisper_install_dir(runtimes_dir: Path, platform: str, backend: str) -> Path:
+    """Windows keeps one directory per backend. Other platforms stay on the historical path."""
+    root = runtimes_dir / "whisper.cpp" / WHISPER_CPP_VERSION
+    if platform == "win32":
+        return root / ("cuda" if backend == "cuda" else "cpu")
+    return root
 
 
 def github_release_url(repo: str, tag: str, asset: str) -> str:
@@ -153,14 +164,14 @@ class RuntimeInstaller:
         url = github_release_url(SPEECH_CPP_REPO, f"v{SPEECH_CPP_VERSION}", asset)
         return self._install(url, asset, destination, "speech", key)
 
-    def ensure_whisper(self, platform: str | None = None) -> Path:
+    def ensure_whisper(self, platform: str | None = None, backend: str = "cpu") -> Path:
         platform = platform or os.sys.platform
-        root = self.runtimes_dir / "whisper.cpp" / WHISPER_CPP_VERSION
+        root = whisper_install_dir(self.runtimes_dir, platform, backend)
         key = _runtime_digest_key(root, self.runtimes_dir)
         binary = self._verified_binary(key, root, "whisper-cli", alt_name="main")
         if binary:
             return binary
-        asset = whisper_asset_name(platform)
+        asset = whisper_asset_name(platform, backend)
         url = github_release_url(WHISPER_CPP_REPO, WHISPER_CPP_VERSION, asset)
         return self._install(url, asset, root, "whisper-cli", key, alt_name="main")
 

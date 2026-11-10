@@ -691,6 +691,20 @@ def test_runtime_reuse_rechecks_the_recorded_digest(tmp_path, monkeypatch):
     assert not binary.exists()
 
 
+def test_windows_cuda_whisper_installs_into_its_own_directory(tmp_path, monkeypatch):
+    from local_translate import runtime_fetch
+    from local_translate.runtime_fetch import whisper_asset_name
+
+    asset = whisper_asset_name("win32", "cuda")
+    payload = archive_bytes_for_tests(asset, "whisper-cli.exe", b"cuda-whisper")
+    monkeypatch.setitem(runtime_fetch.RUNTIME_ASSET_SHA256, asset, hashlib.sha256(payload).hexdigest())
+    installer = _zip_installer(tmp_path)
+    installer.opener = lambda url, destination: destination.write_bytes(payload)
+    binary = installer.ensure_whisper("win32", "cuda")
+    assert binary.name == "whisper-cli.exe"
+    assert binary.parent.name == "cuda"
+
+
 def test_unpinned_runtime_records_the_first_download_and_rechecks_reinstalls(tmp_path, monkeypatch):
     from local_translate import runtime_fetch
     from local_translate.constants import WHISPER_CPP_VERSION
@@ -703,7 +717,7 @@ def test_unpinned_runtime_records_the_first_download_and_rechecks_reinstalls(tmp
     installer.opener = lambda url, destination: destination.write_bytes(payload)
     binary = installer.ensure_whisper("win32")
     digests = json.loads(installer.digests_path.read_text(encoding="utf-8"))
-    assert digests[f"whisper.cpp/{WHISPER_CPP_VERSION}"]["archive_sha256"] == hashlib.sha256(payload).hexdigest()
+    assert digests[f"whisper.cpp/{WHISPER_CPP_VERSION}/cpu"]["archive_sha256"] == hashlib.sha256(payload).hexdigest()
     binary.unlink()
     tampered = archive_bytes_for_tests(asset, "whisper-cli", b"payload-v2")
     installer.opener = lambda url, destination: destination.write_bytes(tampered)

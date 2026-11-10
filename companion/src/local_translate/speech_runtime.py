@@ -53,6 +53,15 @@ class SpeechRuntime:
     def runtime_backend(self) -> str:
         return "vulkan" if self.device_name() == "gpu" else "cpu"
 
+    def whisper_runtime_backend(self) -> str:
+        """whisper.cpp backend. CUDA when the user asked for an NVIDIA GPU."""
+        requested = self.settings.data.get("gpu_backend", "auto")
+        if requested == "cuda":
+            return "cuda"
+        if requested == "auto" and self.gpu.cuda_available:
+            return "cuda"
+        return "cpu"
+
     def active_catalog_name(self) -> str:
         engine = self.settings.data["asr_engine"]
         if engine == "qwen3-asr":
@@ -110,7 +119,7 @@ class SpeechRuntime:
         record = self.registry.file_record(model_id)
         if not record:
             raise CompanionError("whisper_model_missing", "whisper モデルを先にダウンロードしてください", 409)
-        binary = await asyncio.to_thread(self.installer.ensure_whisper)
+        binary = await asyncio.to_thread(self.installer.ensure_whisper, backend=self.whisper_runtime_backend())
         backend = WhisperCppBackend(str(binary), __import__("pathlib").Path(record["path"]))
         return await backend.transcribe_pcm(pcm, sample_rate)
 

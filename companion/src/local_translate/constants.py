@@ -29,6 +29,8 @@ RUNTIME_ASSET_SHA256 = {
     f"llama-{LLAMA_CPP_VERSION}-bin-win-vulkan-x64.zip": "20954cbad1a4626436c6ebaed5e48477f68427b075934689f360301ac426a2f1",
     "cudart-llama-bin-win-cuda-12.4-x64.zip": "8c79a9b226de4b3cacfd1f83d24f962d0773be79f1e7b75c6af4ded7e32ae1d6",
     "whisper-bin-ubuntu-x64.tar.gz": "a72becf15d7917f990f6313867a52638b82b7f9ef237fb0c980dac56a135781c",
+    "whisper-bin-win-cuda-12.4.0-x64.zip": "afef0b881c500958921c3f5523b50e59ee2ec9b6f5cbd25b324c51ed308a957a",
+    "whisper-bin-x64.zip": "6ba69e3482d7826214f90a6a9c84ca07782aec1e1d0c6a7c30c994fd5d816ccb",
     f"speech-{SPEECH_CPP_VERSION}-linux-x64-cpu.zip": "3396d6b2ec38c2922ff0f24a760f7b45c4ac601788f53f03eb77134393bc768b",
     f"speech-{SPEECH_CPP_VERSION}-linux-x64-vulkan.zip": "187d639813c1836f24bcd22f518b9050f8c10bfd6af3b8198c2d8fb6122165ba",
     f"speech-{SPEECH_CPP_VERSION}-windows-x64-vulkan.zip": "a8fe0e4b4f463c460e7ace9d38c363bec08b254cac5a7f764b7967af35d4fa1a",

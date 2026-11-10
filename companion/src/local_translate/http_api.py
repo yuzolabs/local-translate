@@ -316,7 +316,7 @@ async def install_runtime(request: web.Request) -> web.Response:
     elif name == "speech":
         path = await asyncio.to_thread(state.installer.ensure_speech, backend)
     elif name == "whisper":
-        path = await asyncio.to_thread(state.installer.ensure_whisper)
+        path = await asyncio.to_thread(state.installer.ensure_whisper, backend=state.speech.whisper_runtime_backend())
     else:
         raise CompanionError("unknown_runtime", "runtime は llama / speech / whisper です", 404)
     return web.json_response({"status": "installed", "path": str(path)})
