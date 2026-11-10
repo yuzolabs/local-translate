@@ -54,6 +54,7 @@ async def measure_one(session: aiohttp.ClientSession, url: str, token: str, pcm:
 
         sender = asyncio.create_task(send())
         final = None
+        finished = None
         deadline = time.perf_counter() + 120 + len(pcm) / (16000 * 2)
         while time.perf_counter() < deadline:
             message = await asyncio.wait_for(socket.receive(), timeout=max(1, deadline - time.perf_counter()))
@@ -64,11 +65,11 @@ async def measure_one(session: aiohttp.ClientSession, url: str, token: str, pcm:
             payload = json.loads(message.data)
             if payload.get("final"):
                 final = payload
+                finished = time.perf_counter()
                 break
         await sender
-        if final is None:
+        if final is None or finished is None:
             raise SystemExit("確定字幕が返りませんでした")
-        finished = time.perf_counter()
         return {
             "audio_sec": round(len(pcm) / (16000 * 2), 3),
             "latency_sec": round(finished - speech_end, 3),
