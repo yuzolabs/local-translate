@@ -1,0 +1,10 @@
+{
+  "measured_at": "2026-11-10",
+  "device": "NVIDIA GeForce RTX 4070 Ti SUPER, 16376 MiB, Ryzen 9 7900X, Windows 11",
+  "version": "0.1.0",
+  "idle_rss_mb": 45,
+  "main_window_handle": 0,
+  "detach": "離脱を許さない Job の中から起動しても、daemon 相当のプロセスは Job を閉じた後も残った。CREATE_BREAKAWAY_FROM_JOB だけでは残らなかったため、explorer を親にして起動している。",
+  "child_cleanup": "daemon を強制終了したあと、llama-server.exe と speech.exe はプロセス一覧から消え、GPU 使用メモリは 786 MiB まで戻った。",
+  "note": "アイドル時の rss_mb はモデルも子プロセスも載せていない起動直後の GET /v1/status。"
+}
