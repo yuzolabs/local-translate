@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import os
 import signal
 import sys
 import time
@@ -114,10 +115,18 @@ def attach_daemon_log(path) -> None:
     logging.basicConfig(level=logging.INFO, stream=stream, format="%(levelname)s %(name)s %(message)s", force=True)
 
 
+def configure_daemon_logging(path) -> None:
+    """Windows opens its own UTF-8 log. POSIX keeps the stderr the host already redirected."""
+    if os.name == "nt":
+        attach_daemon_log(path)
+        return
+    logging.basicConfig(level=logging.INFO, stream=sys.stderr, format="%(levelname)s %(name)s %(message)s")
+
+
 def main() -> None:
     from local_translate.paths import default_app_paths
 
-    attach_daemon_log(default_app_paths().daemon_log_path)
+    configure_daemon_logging(default_app_paths().daemon_log_path)
     parser = argparse.ArgumentParser(description="Local translation companion daemon")
     parser.add_argument("--port", type=int, default=0)
     args = parser.parse_args()

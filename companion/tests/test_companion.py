@@ -935,6 +935,50 @@ def test_codepoint_patch_and_asr_summary_omit_transcripts():
     assert "秘密" not in json.dumps(summary, ensure_ascii=False)
 
 
+def test_posix_detached_daemon_redirects_output_to_the_log(tmp_path: Path, monkeypatch):
+    import subprocess
+
+    from local_translate import process_spawn
+
+    captured: dict = {}
+
+    class FakeProcess:
+        pid = 42
+
+    def fake_popen(argv, **kwargs):
+        captured["argv"] = argv
+        captured["kwargs"] = kwargs
+        return FakeProcess()
+
+    monkeypatch.setattr(process_spawn.os, "name", "posix")
+    monkeypatch.setattr(process_spawn.subprocess, "Popen", fake_popen)
+    log_path = tmp_path / "daemon.log"
+    pid = process_spawn.spawn_detached_daemon(["python", "-m", "local_translate.daemon"], tmp_path, log_path)
+    assert pid == 42
+    assert captured["kwargs"]["stderr"] == subprocess.STDOUT
+    assert captured["kwargs"]["start_new_session"] is True
+    assert captured["kwargs"]["stdout"].name.replace("\\", "/").casefold() == str(log_path).replace("\\", "/").casefold()
+    assert captured["kwargs"]["stdout"].closed
+
+
+def test_posix_daemon_logging_keeps_stderr(tmp_path: Path, monkeypatch):
+    import logging
+
+    from local_translate import daemon
+
+    monkeypatch.setattr(daemon.os, "name", "posix")
+    previous_stderr = sys.stderr
+    root = logging.getLogger()
+    previous_handlers = root.handlers[:]
+    try:
+        daemon.configure_daemon_logging(tmp_path / "daemon.log")
+        assert sys.stderr is previous_stderr
+        assert not (tmp_path / "daemon.log").exists()
+    finally:
+        sys.stderr = previous_stderr
+        root.handlers = previous_handlers
+
+
 def test_daemon_log_keeps_japanese_as_utf8(tmp_path: Path):
     import logging
 

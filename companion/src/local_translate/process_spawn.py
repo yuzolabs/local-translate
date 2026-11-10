@@ -134,16 +134,32 @@ def assign_child_process(pid: int) -> None:
     _child_job.assign(pid)
 
 
-def spawn_detached_daemon(argv: list[str], cwd: Path) -> int:
-    """Start the resident daemon so it outlives the native-messaging host. Returns the pid."""
+def spawn_detached_daemon(argv: list[str], cwd: Path, log_path: Path | None = None) -> int:
+    """Start the resident daemon so it outlives the native-messaging host. Returns the pid.
+
+    On POSIX, log_path receives stdout and stderr, including import failures before main.
+    Windows cannot inherit that handle from a reparented process, so the daemon opens it.
+    """
     if os.name != "nt":
-        process = subprocess.Popen(
-            argv,
-            cwd=str(cwd),
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True,
-        )
+        log_handle = None
+        stdout = subprocess.DEVNULL
+        stderr = subprocess.DEVNULL
+        if log_path is not None:
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            log_handle = open(log_path, "ab")
+            stdout = log_handle
+            stderr = subprocess.STDOUT
+        try:
+            process = subprocess.Popen(
+                argv,
+                cwd=str(cwd),
+                stdout=stdout,
+                stderr=stderr,
+                start_new_session=True,
+            )
+        finally:
+            if log_handle is not None:
+                log_handle.close()
         return int(process.pid)
     pid = _spawn_reparented_to_explorer(argv, cwd)
     if pid is not None:

@@ -50,10 +50,11 @@ def ensure_daemon(python: str | None = None) -> tuple[int, str]:
     if port and daemon_healthy(port, token):
         return port, token
     executable = python or sys.executable
-    # 切り離したプロセスには標準出力を渡せない。daemon が自分でログを開く。
+    # Windows では切り離したプロセスに標準出力を渡せない。POSIX はログファイルへ渡す。
     spawn_detached_daemon(
         [executable, "-m", "local_translate.daemon"],
         Path(__file__).resolve().parents[2],
+        paths.daemon_log_path,
     )
     deadline = time.monotonic() + 20
     while time.monotonic() < deadline:
