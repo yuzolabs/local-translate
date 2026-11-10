@@ -435,6 +435,8 @@ async def test_whisper_subtitles_run_through_the_segment_worker_path(tmp_path: P
     model = tmp_path / "model.gguf"
     model.write_bytes(b"gguf")
     state.models.mark_file("plamo-3-translate-0.8b-GGUF", model)
+    # 新規導入時の既定は GPU 推奨に変わるので、テストでは 0.8B を明示する。
+    state.settings.update({"active_translate_model": "plamo-3-translate-0.8b-GGUF"})
     # subtitle_backend が speech-serve 既定でも、whisper 選択なら segment-worker 経路になる。
     assert state.settings.data["subtitle_backend"] == "speech-serve"
     marker = tmp_path / "whisper-marker"
@@ -582,6 +584,8 @@ async def test_status_endpoint_includes_current_models(tmp_path: Path):
     model = tmp_path / "model.gguf"
     model.write_bytes(b"gguf")
     state.models.mark_file("plamo-3-translate-0.8b-GGUF", model)
+    # 新規導入時の既定は GPU 推奨に変わるので、テストでは 0.8B を明示する。
+    state.settings.update({"active_translate_model": "plamo-3-translate-0.8b-GGUF"})
     app = create_app(state)
     async with TestClient(TestServer(app)) as client:
         headers = {"Authorization": f"Bearer {state.token}"}
@@ -594,6 +598,33 @@ async def test_status_endpoint_includes_current_models(tmp_path: Path):
     assert current["asr"]["selected"]["id"] == "Haas-ja-v1.0"
     assert set(current["translate"]) >= {"selected", "loaded", "state", "backend", "context_size", "n_gpu_layers", "parallel"}
     assert set(current["asr"]) >= {"selected", "runtime", "subtitle_pipeline", "loaded", "state", "device", "restart_required"}
+
+
+def test_fresh_install_defaults_to_the_suggested_translate_model(tmp_path: Path, monkeypatch):
+    from local_translate import daemon as daemon_module
+
+    paths = AppPaths.create(tmp_path / "state", tmp_path / "data")
+    paths.ensure()
+    gpu = GpuInfo("cuda", "RTX", 16376, 14000, False, 32000, True, True)
+    monkeypatch.setattr(daemon_module, "detect_gpu", lambda: gpu)
+    # 設定ファイルがなければ推奨 (16GB では 8B) が既定になる。
+    state = AppState(paths)
+    assert state.settings.data["active_translate_model"] == "plamo-3-translate-8b-GGUF"
+    # active_translate_model が保存されていない既存ファイルでも同じ。
+    partial = AppPaths.create(tmp_path / "state-partial", tmp_path / "data-partial")
+    partial.ensure()
+    partial.settings_path.write_text(json.dumps({"parallel": 3}), encoding="utf-8")
+    partial_state = AppState(partial)
+    assert partial_state.settings.data["active_translate_model"] == "plamo-3-translate-8b-GGUF"
+    assert partial_state.translator.parallel_slots == 3
+    # 既存の選択は変えない。
+    kept = AppPaths.create(tmp_path / "state-kept", tmp_path / "data-kept")
+    kept.ensure()
+    kept.settings_path.write_text(
+        json.dumps({"active_translate_model": "plamo-3-translate-2b-GGUF"}), encoding="utf-8"
+    )
+    stored = AppState(kept).settings.data["active_translate_model"]
+    assert stored == "plamo-3-translate-2b-GGUF"
 
 
 def test_site_rule_prefers_exact_host(tmp_path: Path):
@@ -691,6 +722,8 @@ async def test_http_translate_requires_token_and_streams(tmp_path: Path):
     model = tmp_path / "model.gguf"
     model.write_bytes(b"gguf")
     state.models.mark_file("plamo-3-translate-0.8b-GGUF", model)
+    # 新規導入時の既定は GPU 推奨に変わるので、テストでは 0.8B を明示する。
+    state.settings.update({"active_translate_model": "plamo-3-translate-0.8b-GGUF"})
     app = create_app(state)
     async with TestClient(TestServer(app)) as client:
         denied = await client.get("/v1/status")
@@ -747,6 +780,8 @@ async def test_subtitle_socket_emits_final_caption(tmp_path: Path):
     model = tmp_path / "model.gguf"
     model.write_bytes(b"gguf")
     state.models.mark_file("plamo-3-translate-0.8b-GGUF", model)
+    # 新規導入時の既定は GPU 推奨に変わるので、テストでは 0.8B を明示する。
+    state.settings.update({"active_translate_model": "plamo-3-translate-0.8b-GGUF"})
     state.settings.update({"subtitle_backend": "segment-worker", "translate_interim": False})
 
     async def transcribe_pcm(pcm: bytes, sample_rate: int = 16000) -> str:

@@ -42,6 +42,10 @@ class AppState:
         self.models = ModelRegistry(paths.registry_path, paths.models_dir)
         self.events = EventBus()
         self.gpu = detect_gpu()
+        # 設定ファイルがない、または active_translate_model が保存されていない
+        # ときだけ推奨モデルを既定にする。既存の利用者の選択は変えない。
+        if "active_translate_model" not in self.settings.stored_keys:
+            self.settings.update({"active_translate_model": suggest_runtime(self.gpu).model_id})
         self.installer = RuntimeInstaller(paths.runtimes_dir, digests_path=paths.runtime_digests_path)
         self.llama = LlamaServerManager(self.installer, self.events, self.gpu, int(self.settings.data["idle_timeout_sec"]))
         self.llama.log_path = paths.daemon_log_path
