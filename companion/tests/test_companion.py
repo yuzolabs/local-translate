@@ -888,6 +888,25 @@ def test_windows_detached_daemon_survives_a_job_that_forbids_breakaway():
         kernel32.CloseHandle(ctypes.c_void_p(killer))
 
 
+def test_codepoint_patch_and_asr_summary_omit_transcripts():
+    from local_translate.asr.transcript_patch import apply_codepoint_patch
+    from local_translate.asr_verify import summarize_asr_report
+
+    assert apply_codepoint_patch("abcdef", [[2, 4, "X"]]) == "abXef"
+    assert apply_codepoint_patch("abcdef", [[4, 5, ""], [1, 2, "Z"]]) == "aZcdf"
+    summary = summarize_asr_report(
+        {
+            "dataset": "FLEURS ja_jp test",
+            "license": "CC BY 4.0",
+            "samples": [{"reference": "秘密", "hypothesis": "秘密", "cer": 0.0, "latency_sec": 1.2}],
+            "cer": {"measured": 0.0},
+        }
+    )
+    assert summary["count"] == 1
+    assert "reference" not in json.dumps(summary, ensure_ascii=False)
+    assert "秘密" not in json.dumps(summary, ensure_ascii=False)
+
+
 def test_daemon_log_keeps_japanese_as_utf8(tmp_path: Path):
     import logging
 
