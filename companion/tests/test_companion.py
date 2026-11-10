@@ -888,6 +888,40 @@ def test_windows_detached_daemon_survives_a_job_that_forbids_breakaway():
         kernel32.CloseHandle(ctypes.c_void_p(killer))
 
 
+def test_daemon_log_keeps_japanese_as_utf8(tmp_path: Path):
+    import logging
+
+    from local_translate.daemon import attach_daemon_log
+
+    previous_stderr = sys.stderr
+    root = logging.getLogger()
+    previous_handlers = root.handlers[:]
+    path = tmp_path / "daemon.log"
+    try:
+        attach_daemon_log(path)
+        logging.getLogger("local_translate.daemon").info("日本語ログ")
+        sys.stderr.flush()
+        assert "日本語ログ" in path.read_text(encoding="utf-8")
+    finally:
+        sys.stderr = previous_stderr
+        root.handlers = previous_handlers
+
+
+def test_windows_child_job_kills_the_process_when_closed():
+    if sys.platform != "win32":
+        pytest.skip("Windows の Job Object です")
+    import subprocess
+
+    from local_translate.process_spawn import CREATE_NO_WINDOW, ChildProcessJob
+
+    job = ChildProcessJob()
+    process = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"], creationflags=CREATE_NO_WINDOW)
+    job.assign(process.pid)
+    job.close()
+    process.wait(timeout=5)
+    assert process.returncode is not None
+
+
 def test_windows_reports_available_ram_and_resident_memory():
     if sys.platform != "win32":
         pytest.skip("Windows のメモリ取得です")

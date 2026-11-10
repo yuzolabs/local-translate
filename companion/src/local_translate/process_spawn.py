@@ -20,7 +20,11 @@ DETACHED_PROCESS = 0x00000008
 CREATE_NO_WINDOW = 0x08000000
 EXTENDED_STARTUPINFO_PRESENT = 0x00080000
 PROCESS_CREATE_PROCESS = 0x0080
+PROCESS_SET_QUOTA = 0x0100
+PROCESS_TERMINATE = 0x0001
 PROC_THREAD_ATTRIBUTE_PARENT_PROCESS = 0x00020000
+JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000
+JobObjectExtendedLimitInformation = 9
 
 
 def hidden_child_kwargs(platform: str | None = None) -> dict:
@@ -31,10 +35,100 @@ def hidden_child_kwargs(platform: str | None = None) -> dict:
 
 
 async def create_hidden_subprocess(*argv: str, **kwargs):
-    """Start a child with no console window. The daemon's job is applied separately."""
+    """Start a child with no console window and bind it to the daemon's kill-on-close job."""
     kwargs.pop("start_new_session", None)
     kwargs.update(hidden_child_kwargs())
-    return await asyncio.create_subprocess_exec(*argv, **kwargs)
+    process = await asyncio.create_subprocess_exec(*argv, **kwargs)
+    assign_child_process(process.pid)
+    return process
+
+
+class ChildProcessJob:
+    """Windows job that ends llama-server and speech.cpp when the daemon exits."""
+
+    def __init__(self) -> None:
+        self._handle: int | None = None
+
+    def assign(self, pid: int) -> None:
+        """Put pid in this job. No-op off Windows or if the process has already exited."""
+        if os.name != "nt" or pid <= 0:
+            return
+        job = self._ensure()
+        if job is None:
+            return
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.OpenProcess.restype = ctypes.c_void_p
+        kernel32.OpenProcess.argtypes = [ctypes.c_ulong, ctypes.c_int, ctypes.c_ulong]
+        process = kernel32.OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, False, pid)
+        if not process:
+            return
+        try:
+            kernel32.AssignProcessToJobObject(ctypes.c_void_p(job), ctypes.c_void_p(process))
+        finally:
+            kernel32.CloseHandle(ctypes.c_void_p(process))
+
+    def close(self) -> None:
+        """Close the job handle. Kill-on-close then ends every assigned process."""
+        handle = self._handle
+        self._handle = None
+        if handle:
+            ctypes.WinDLL("kernel32").CloseHandle(ctypes.c_void_p(handle))
+
+    def _ensure(self) -> int | None:
+        if self._handle:
+            return self._handle
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateJobObjectW.restype = ctypes.c_void_p
+        job = kernel32.CreateJobObjectW(None, None)
+        if not job:
+            return None
+
+        class IoCounters(ctypes.Structure):
+            _fields_ = [("count", ctypes.c_ulonglong)] * 6
+
+        class BasicLimit(ctypes.Structure):
+            _fields_ = [
+                ("PerProcessUserTimeLimit", ctypes.c_longlong),
+                ("PerJobUserTimeLimit", ctypes.c_longlong),
+                ("LimitFlags", ctypes.c_ulong),
+                ("MinimumWorkingSetSize", ctypes.c_size_t),
+                ("MaximumWorkingSetSize", ctypes.c_size_t),
+                ("ActiveProcessLimit", ctypes.c_ulong),
+                ("Affinity", ctypes.c_size_t),
+                ("PriorityClass", ctypes.c_ulong),
+                ("SchedulingClass", ctypes.c_ulong),
+            ]
+
+        class ExtendedLimit(ctypes.Structure):
+            _fields_ = [
+                ("Basic", BasicLimit),
+                ("IoInfo", IoCounters),
+                ("ProcessMemoryLimit", ctypes.c_size_t),
+                ("JobMemoryLimit", ctypes.c_size_t),
+                ("PeakProcessMemoryUsed", ctypes.c_size_t),
+                ("PeakJobMemoryUsed", ctypes.c_size_t),
+            ]
+
+        info = ExtendedLimit()
+        info.Basic.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        if not kernel32.SetInformationJobObject(
+            ctypes.c_void_p(job),
+            JobObjectExtendedLimitInformation,
+            ctypes.byref(info),
+            ctypes.sizeof(info),
+        ):
+            kernel32.CloseHandle(ctypes.c_void_p(job))
+            return None
+        self._handle = job
+        return job
+
+
+_child_job = ChildProcessJob()
+
+
+def assign_child_process(pid: int) -> None:
+    """Bind a daemon child to the process-lifetime job that frees its VRAM on exit."""
+    _child_job.assign(pid)
 
 
 def spawn_detached_daemon(argv: list[str], cwd: Path) -> int:
