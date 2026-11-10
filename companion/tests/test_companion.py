@@ -469,6 +469,133 @@ async def test_whisper_subtitles_run_through_the_segment_worker_path(tmp_path: P
     assert seen["model"] == "whisper-large-v3-turbo"
 
 
+def _current_test_state(tmp_path: Path):
+    from local_translate.current_models import build_current
+
+    paths = AppPaths.create(tmp_path / "state", tmp_path / "data")
+    state = AppState(paths)
+    state.gpu = GpuInfo("cuda", "RTX", 16376, 14000, False, 32000, True, True)
+    state.llama = FakeLlama()
+    return state, build_current
+
+
+def test_status_current_reports_the_ready_translate_model(tmp_path: Path):
+    state, build_current = _current_test_state(tmp_path)
+    model = tmp_path / "model.gguf"
+    model.write_bytes(b"gguf")
+    state.models.mark_file("plamo-3-translate-8b-GGUF", model)
+    state.settings.update({"active_translate_model": "plamo-3-translate-8b-GGUF"})
+    state.llama.state = "ready"
+    state.llama.model_id = "plamo-3-translate-8b-GGUF"
+    current = build_current(state)
+    translate = current["translate"]
+    assert translate["selected"] == {
+        "id": "plamo-3-translate-8b-GGUF",
+        "label": "PLaMo 3 Translate 8B",
+        "quant": "Q4_K_M",
+        "short_label": "8B",
+    }
+    assert translate["loaded"] == {"id": "plamo-3-translate-8b-GGUF"}
+    assert translate["state"] == "ready"
+    assert translate["backend"] == "cuda"
+    assert translate["backend_error"] is None
+    assert translate["context_size"] == 8192
+    assert translate["n_gpu_layers"] == 99
+    assert translate["parallel"] == 2
+    # 選択中と違うモデルが稼働していれば「切り替え中」と分かる形で返す。
+    state.llama.model_id = "plamo-3-translate-0.8b-GGUF"
+    assert build_current(state)["translate"]["loaded"] == {"id": "plamo-3-translate-0.8b-GGUF"}
+
+
+def test_status_current_covers_starting_stopped_and_not_downloaded(tmp_path: Path):
+    state, build_current = _current_test_state(tmp_path)
+    model = tmp_path / "model.gguf"
+    model.write_bytes(b"gguf")
+    state.models.mark_file("plamo-3-translate-31b-GGUF-Q2_K", model)
+    state.settings.update({"active_translate_model": "plamo-3-translate-31b-GGUF-Q2_K"})
+    state.llama.state = "starting"
+    state.llama.model_id = "plamo-3-translate-31b-GGUF-Q2_K"
+    current = build_current(state)["translate"]
+    assert current["state"] == "starting"
+    assert current["loaded"] == {"id": "plamo-3-translate-31b-GGUF-Q2_K"}
+    state.llama.state = "stopped"
+    state.llama.model_id = None
+    current = build_current(state)["translate"]
+    assert current["state"] == "stopped" and current["loaded"] is None
+    # ダウンロードされていない選択は稼働状況より優先して未ダウンロードと返す。
+    state.settings.update({"active_translate_model": "plamo-3-translate-31b-GGUF-Q4_K_M"})
+    current = build_current(state)["translate"]
+    assert current["state"] == "not_downloaded"
+
+
+def test_status_current_returns_backend_errors_without_raising(tmp_path: Path):
+    state, build_current = _current_test_state(tmp_path)
+    state.gpu = GpuInfo("cpu", "CPU", None, None, False, 8000, False, False)
+    state.settings.update({"gpu_backend": "cuda"})
+    current = build_current(state)["translate"]
+    assert current["backend"] is None
+    assert current["backend_error"]
+
+
+def test_status_current_reports_the_running_asr_serve_and_pending_restart(tmp_path: Path):
+    state, build_current = _current_test_state(tmp_path)
+    marker = tmp_path / "catalog-marker"
+    marker.write_text("haas-ja-v1.0", encoding="utf-8")
+    state.models.mark_file("Haas-ja-v1.0", marker)
+    state.speech.serve = FakeServeProcess("speech", ["haas-ja-v1.0", "silero-vad"])
+    state.speech.serve.port = 9
+    current = build_current(state)["asr"]
+    assert current["selected"]["id"] == "Haas-ja-v1.0"
+    assert current["selected"]["label"] == "Haas-ja v1.0"
+    assert current["runtime"] == "speech.cpp"
+    assert current["subtitle_pipeline"] == "speech-serve"
+    assert current["loaded"] == {"id": "Haas-ja-v1.0"}
+    assert current["state"] == "ready"
+    assert current["device"] == "gpu"
+    assert current["restart_required"] is False
+    # 字幕セッション中に選択が変われば次の字幕開始時に切り替え。
+    state.speech.restart_required = True
+    assert build_current(state)["asr"]["restart_required"] is True
+
+
+def test_status_current_marks_an_undownloaded_asr_stopped_and_whisper_cpu(tmp_path: Path):
+    state, build_current = _current_test_state(tmp_path)
+    marker = tmp_path / "whisper-marker"
+    marker.write_bytes(b"ggml")
+    state.models.mark_file("whisper-base", marker)
+    state.settings.update({"active_asr_model": "whisper-base"})
+    current = build_current(state)["asr"]
+    assert current["runtime"] == "whisper.cpp"
+    assert current["subtitle_pipeline"] == "segment-worker"
+    assert current["state"] == "stopped"
+    assert current["loaded"] is None
+    assert current["device"] == "cuda"
+    # 未ダウンロードの ASR は待機中ではなく未ダウンロード。
+    state.settings.update({"active_asr_model": "whisper-large-v3-turbo"})
+    current = build_current(state)["asr"]
+    assert current["state"] == "not_downloaded"
+
+
+@pytest.mark.asyncio
+async def test_status_endpoint_includes_current_models(tmp_path: Path):
+    state, _build = _current_test_state(tmp_path)
+    model = tmp_path / "model.gguf"
+    model.write_bytes(b"gguf")
+    state.models.mark_file("plamo-3-translate-0.8b-GGUF", model)
+    app = create_app(state)
+    async with TestClient(TestServer(app)) as client:
+        headers = {"Authorization": f"Bearer {state.token}"}
+        response = await client.get("/v1/status", headers=headers)
+        assert response.status == 200
+        body = await response.json()
+    current = body["current"]
+    assert current["translate"]["selected"]["id"] == "plamo-3-translate-0.8b-GGUF"
+    assert current["translate"]["selected"]["short_label"] == "0.8B"
+    assert current["asr"]["selected"]["id"] == "Haas-ja-v1.0"
+    assert set(current["translate"]) >= {"selected", "loaded", "state", "backend", "context_size", "n_gpu_layers", "parallel"}
+    assert set(current["asr"]) >= {"selected", "runtime", "subtitle_pipeline", "loaded", "state", "device", "restart_required"}
+
+
 def test_site_rule_prefers_exact_host(tmp_path: Path):
     store = SettingsStore(tmp_path / "settings.json")
     store.update(

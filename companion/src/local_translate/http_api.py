@@ -25,6 +25,7 @@ from local_translate.constants import (
     WINDOWS_HAAS_DECISION,
     WINDOWS_HAAS_DECISION_REASON,
 )
+from local_translate.current_models import build_current
 from local_translate.errors import CompanionError
 from local_translate.languages import LANGUAGES
 from local_translate.license_texts import LICENSES
@@ -158,6 +159,7 @@ async def status(request: web.Request) -> web.Response:
                 "alternatives": list(suggestion.alternatives),
             },
             "llama": state.llama.status(),
+            "current": build_current(state),
             "active_sessions": {"subtitles": state.subtitle_sessions},
             "capabilities": [
                 "translate",
