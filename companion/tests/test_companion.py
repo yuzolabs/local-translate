@@ -888,6 +888,29 @@ def test_windows_detached_daemon_survives_a_job_that_forbids_breakaway():
         kernel32.CloseHandle(ctypes.c_void_p(killer))
 
 
+@pytest.mark.asyncio
+async def test_verify_references_summarizes_cer_without_transcripts(tmp_path: Path, monkeypatch):
+    from local_translate import asr_verify
+
+    async def fake_run_asr(speech_bin: str, model: str, wav_path: Path) -> tuple[str, float]:
+        del speech_bin, model, wav_path
+        return "秘密の字幕", 0.2
+
+    monkeypatch.setattr(asr_verify, "run_asr", fake_run_asr)
+    references = tmp_path / "references.jsonl"
+    references.write_text(
+        json.dumps({"wav": "a.wav", "text": "秘密の字幕"}, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    report = await asr_verify.verify("speech", None, references, tmp_path / "detail.json")
+    assert report["cer"]["measured"] == 0.0
+    summary = asr_verify.summarize_asr_report(report)
+    dumped = json.dumps(summary, ensure_ascii=False)
+    assert "秘密の字幕" not in dumped
+    assert "samples" not in summary
+    assert summary["cer"]["measured"] == 0.0
+
+
 def test_codepoint_patch_and_asr_summary_omit_transcripts():
     from local_translate.asr.transcript_patch import apply_codepoint_patch
     from local_translate.asr_verify import summarize_asr_report

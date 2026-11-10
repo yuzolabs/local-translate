@@ -88,7 +88,7 @@ async def verify(speech_bin: str, samples: Path | None, references: Path | None,
                 }
             )
         if weights:
-            measured = errors / weights
+            measured = sum(errors) / weights
             report["cer"] = {
                 "measured": measured,
                 "nemo_reference": NEMO_CER_STRICT,
