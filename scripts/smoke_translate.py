@@ -1,10 +1,10 @@
-"""Download the pinned 0.8B GGUF if needed and record one CPU translation."""
+"""Download the pinned 0.8B GGUF if needed and record one translation."""
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
-import subprocess
 import sys
 import time
 import urllib.error
@@ -12,6 +12,9 @@ import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "companion" / "src"))
+from local_translate.process_spawn import spawn_detached_daemon
+
 MODEL_ID = "plamo-3-translate-0.8b-GGUF"
 
 
@@ -78,14 +81,8 @@ def ensure_daemon(state: Path) -> tuple[int, str]:
         return endpoint
     if not lock_is_free(state / "daemon.lock"):
         raise SystemExit("既存の daemon がロックを保持していますが応答しません。プロセスを確認してください。")
-    log = open(state / "daemon.log", "ab")
-    subprocess.Popen(
-        [sys.executable, "-m", "local_translate.daemon"],
-        cwd=str(ROOT / "companion"),
-        stdout=log,
-        stderr=subprocess.STDOUT,
-        start_new_session=True,
-    )
+    os.environ["LOCAL_TRANSLATE_STATE_DIR"] = str(state)
+    spawn_detached_daemon([sys.executable, "-m", "local_translate.daemon"], ROOT / "companion")
     deadline = time.time() + 20
     while time.time() < deadline:
         endpoint = read_daemon_endpoint(state)
@@ -95,19 +92,33 @@ def ensure_daemon(state: Path) -> tuple[int, str]:
     raise SystemExit("daemon が起動しませんでした。state/daemon.log を確認してください。")
 
 
+def default_state_dir() -> Path:
+    override = os.environ.get("LOCAL_TRANSLATE_STATE_DIR")
+    if override:
+        return Path(override)
+    if sys.platform == "win32":
+        base = Path(os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData" / "Local")))
+        return base / "local-translate-extension"
+    return Path.home() / ".local" / "state" / "local-translate-extension"
+
+
 def main() -> None:
-    env = os.environ.copy()
-    state = Path(env.get("LOCAL_TRANSLATE_STATE_DIR", Path.home() / ".local/state/local-translate-extension"))
+    parser = argparse.ArgumentParser(description="0.8B モデルで翻訳の疎通を記録する")
+    parser.add_argument("--backend", choices=("auto", "cuda", "vulkan", "cpu"), default="cpu")
+    args = parser.parse_args()
+    state = default_state_dir()
     state.mkdir(parents=True, exist_ok=True)
     port, token = ensure_daemon(state)
     request(port, token, "POST", f"/v1/models/{MODEL_ID}/consent", {"accepted": True})
-    request(port, token, "POST", "/v1/settings", {
-        "gpu_backend": "cpu",
-        "n_gpu_layers": 0,
+    settings = {
+        "gpu_backend": args.backend,
         "context_size": 512,
         "parallel": 1,
         "active_translate_model": MODEL_ID,
-    })
+    }
+    if args.backend == "cpu":
+        settings["n_gpu_layers"] = 0
+    request(port, token, "POST", "/v1/settings", settings)
     models = request(port, token, "GET", "/v1/models")["models"]
     ready = next(item for item in models if item["id"] == MODEL_ID)["status"] == "ready"
     if not ready:

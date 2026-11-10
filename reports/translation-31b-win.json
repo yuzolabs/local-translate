@@ -1,0 +1,56 @@
+{
+  "measured_at": "2026-11-10",
+  "device": "NVIDIA GeForce RTX 4070 Ti SUPER, 16376 MiB, driver 610.88, Windows 11",
+  "backend": "cuda",
+  "decision": "16GB の段の代替は 31B Q2_K にする。Q3_K_M は n_gpu_layers 99 でも空き VRAM に収まらず、生成は約 11〜13 tok/s。Q2_K は製品の ctx 8192・parallel 2・ngl 99 で fit 警告がなく、空き 1287 MiB、短い生成で 40.34 tok/s。",
+  "models": [
+    {
+      "model_id": "plamo-3-translate-31b-GGUF-Q3_K_M",
+      "quant": "Q3_K_M",
+      "context_size": 2048,
+      "n_gpu_layers": 99,
+      "load_seconds": 9.062,
+      "vram_used_mib": 15953,
+      "vram_free_mib": 109,
+      "fit_warning": "failed to fit params to free device memory",
+      "generation_tok_per_sec": [11.33, 12.71, 12.16, 10.74],
+      "generation_after_ready": [
+        {"source": "Hello.", "translation": "こんにちは。", "seconds": 0.278},
+        {"source": "The meeting has been rescheduled to next Monday.", "translation": "会議は来週の月曜日に延期されました。", "seconds": 0.893},
+        {"source": "Please save your changes.", "translation": "変更内容を保存してください。", "seconds": 0.586}
+      ]
+    },
+    {
+      "model_id": "plamo-3-translate-31b-GGUF-Q2_K",
+      "quant": "Q2_K",
+      "context_size": 4096,
+      "n_gpu_layers": 99,
+      "load_seconds": 8.012,
+      "vram_used_mib": 13892,
+      "vram_free_mib": 2170,
+      "generation_tok_per_sec": [20.20, 38.97, 40.98, 40.61],
+      "generation_after_ready": [
+        {"source": "Hello.", "translation": "こんにちは。", "seconds": 0.138},
+        {"source": "The meeting has been rescheduled to next Monday.", "translation": "会議は来週の月曜日に変更されました。", "seconds": 0.26},
+        {"source": "Please save your changes.", "translation": "変更内容を保存してください。", "seconds": 0.193}
+      ],
+      "note": "2文目が 延期 ではなく 変更 になった。速度と空き VRAM は Q3_K_M より余裕がある。"
+    },
+    {
+      "model_id": "plamo-3-translate-31b-GGUF-Q2_K",
+      "quant": "Q2_K",
+      "context_size": 8192,
+      "parallel": 2,
+      "n_gpu_layers": 99,
+      "n_slots": 2,
+      "n_ctx_slot": 4096,
+      "load_seconds": 7.195,
+      "vram_used_mib": 14775,
+      "vram_free_mib": 1287,
+      "fit_warning": false,
+      "eval_tok_per_sec": 40.34,
+      "eval_tokens": 8,
+      "note": "品質確認ではなく、製品の起動条件で VRAM に収まるかどうかの確認。"
+    }
+  ]
+}

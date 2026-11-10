@@ -1,0 +1,17 @@
+{
+  "measured_at": "2026-11-10",
+  "device": "NVIDIA GeForce RTX 4070 Ti SUPER via Vulkan0",
+  "runtime": "speech.cpp 0.10.1 windows-x64-vulkan",
+  "model": "haas-ja-v1.0",
+  "dataset": "FLEURS ja_jp test, asr-ja-bench v1.1 fleurs",
+  "license": "CC BY 4.0",
+  "count": 30,
+  "selection": "修正パッチがあるサンプルを先に取り、残りは asr-ja-bench の順",
+  "cer": 0.0921,
+  "cer_note": "cer.py の文字誤り率。Haas-ja 公表の jacer 正規化 CER 6.12% とは直接比べられない。",
+  "asr_latency_sec": {"count": 30, "mean": 0.845, "p50": 0.472, "p95": 1.501},
+  "subtitle_e2e_latency_sec": {"count": 30, "mean": 0.875, "p50": 0.783, "p95": 0.989},
+  "subtitle_e2e_note": "VAD の audio_end_ms を送り終えた時刻から 8B 翻訳を含む確定字幕まで。1本目 4.377 秒は speech.cpp と llama-server の起動を含む。1本目を除く平均は 0.754 秒。30 本すべて翻訳あり。以前の 0.879 秒は無音送信完了後に時刻を取ったため無効。",
+  "gpu_used": true,
+  "chrome_manual_check": "未実施。拡張からの字幕開始は利用者の操作が必要。"
+}

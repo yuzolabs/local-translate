@@ -8,6 +8,7 @@ from typing import Any
 
 from local_translate.constants import DEFAULT_FORM, DEFAULT_IDLE_TIMEOUT_SEC, DEFAULT_SOURCE_LANG, DEFAULT_TARGET_LANG
 from local_translate.errors import CompanionError
+from local_translate.json_store import read_text_allowing_replace, replace_file_despite_open_readers
 from local_translate.languages import LANGUAGE_CODES
 
 SETTING_KEYS = {
@@ -70,7 +71,7 @@ class SettingsStore:
     def load(self) -> None:
         if not self.path.exists():
             return
-        stored = json.loads(self.path.read_text(encoding="utf-8"))
+        stored = json.loads(read_text_allowing_replace(self.path))
         if isinstance(stored, dict):
             self.data.update({key: value for key, value in stored.items() if key in SETTING_KEYS})
 
@@ -78,7 +79,7 @@ class SettingsStore:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         temporary = self.path.with_suffix(".json.tmp")
         temporary.write_text(json.dumps(self.data, ensure_ascii=False, indent=2), encoding="utf-8")
-        temporary.replace(self.path)
+        replace_file_despite_open_readers(temporary, self.path)
 
     def snapshot(self) -> dict[str, Any]:
         return json.loads(json.dumps(self.data))

@@ -1,0 +1,34 @@
+{
+  "measured_at": "2026-11-10",
+  "device": "NVIDIA GeForce RTX 4070 Ti SUPER, 16376 MiB, driver 610.88, Windows 11",
+  "backend": "cuda",
+  "runtime": "llama.cpp b12211 win-cuda-12.4 with cudart-12.4",
+  "models": [
+    {
+      "model_id": "plamo-3-translate-0.8b-GGUF",
+      "quant": "Q4_K_M",
+      "context_size": 512,
+      "wall_seconds_including_model_start": 11.69,
+      "generation_after_ready": [
+        {"source": "Hello.", "translation": "こんにちは。", "seconds": 0.228},
+        {"source": "The meeting has been rescheduled to next Monday.", "translation": "会議は来週の月曜日に延期されました。", "seconds": 0.247},
+        {"source": "Please save your changes.", "translation": "変更内容を保存してください。", "seconds": 0.034}
+      ],
+      "vram_used_mib": 1838,
+      "note": "訳文は reports/translation-0.8b-cpu.json と同じ。最後の文は llama-server のスロット再利用で短くなっている。"
+    },
+    {
+      "model_id": "plamo-3-translate-8b-GGUF",
+      "quant": "Q4_K_M",
+      "context_size": 8192,
+      "load_seconds": 3.997,
+      "generation_after_ready": [
+        {"source": "Hello.", "translation": "こんにちは。", "seconds": 0.038},
+        {"source": "The meeting has been rescheduled to next Monday.", "translation": "会議は来週の月曜日に延期されました。", "seconds": 0.134},
+        {"source": "Please save your changes.", "translation": "変更内容を保存してください。", "seconds": 0.074}
+      ],
+      "vram_used_mib": 6469,
+      "vram_free_mib": 9593
+    }
+  ]
+}

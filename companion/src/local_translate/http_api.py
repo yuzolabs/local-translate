@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import secrets
 import time
 from typing import Any
@@ -11,6 +12,7 @@ from typing import Any
 from aiohttp import WSMsgType, web
 
 from local_translate.asr.segment_manager import SegmentManager
+from local_translate.backend_choice import resolve_llama_backend
 from local_translate.asr.speech_serve import RealtimeSubtitleBridge
 from local_translate.constants import (
     APP_VERSION,
@@ -32,7 +34,11 @@ from local_translate.vram_presets import suggest_runtime
 
 
 def resident_memory_mb() -> int | None:
-    """Current daemon RSS in MB. /proc on Linux, ru_maxrss as the fallback."""
+    """Current daemon RSS in MB. /proc on Linux, the working set on Windows."""
+    if os.name == "nt":
+        from local_translate.windows_memory import windows_resident_memory_mb
+
+        return windows_resident_memory_mb()
     try:
         with open("/proc/self/status", encoding="utf-8") as handle:
             for line in handle:
@@ -305,13 +311,13 @@ async def post_settings(request: web.Request) -> web.Response:
 async def install_runtime(request: web.Request) -> web.Response:
     state = _state(request)
     name = request.match_info["runtime_name"]
-    backend = state.speech.runtime_backend()
     if name == "llama":
-        path = await asyncio.to_thread(state.installer.ensure_llama, "cpu" if state.gpu.backend == "cpu" else backend)
+        backend = resolve_llama_backend(state.settings.data.get("gpu_backend") or "auto", state.gpu)
+        path = await asyncio.to_thread(state.installer.ensure_llama, backend)
     elif name == "speech":
-        path = await asyncio.to_thread(state.installer.ensure_speech, backend)
+        path = await asyncio.to_thread(state.installer.ensure_speech, state.speech.runtime_backend())
     elif name == "whisper":
-        path = await asyncio.to_thread(state.installer.ensure_whisper)
+        path = await asyncio.to_thread(state.installer.ensure_whisper, backend=state.speech.whisper_runtime_backend())
     else:
         raise CompanionError("unknown_runtime", "runtime は llama / speech / whisper です", 404)
     return web.json_response({"status": "installed", "path": str(path)})

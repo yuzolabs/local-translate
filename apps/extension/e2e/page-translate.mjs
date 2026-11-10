@@ -1,15 +1,17 @@
 import { spawn } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { chromium } from "@playwright/test";
+import { chromeExecutable, companionHostPath, shouldStartXvfb } from "./host-platform.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
 const extensionDir = path.join(root, "apps/extension/.output/chrome-mv3");
-const hostPath = path.join(root, "companion/.venv/bin/local-translate-host");
-const userDataDir = "/tmp/lt-page-profile";
-const display = process.env.DISPLAY ? null : spawn("Xvfb", [":97", "-screen", "0", "1280x800x24"], { stdio: "ignore" });
-if (!process.env.DISPLAY) {
+const hostPath = companionHostPath(root);
+const userDataDir = path.join(tmpdir(), "lt-page-profile");
+const display = shouldStartXvfb() ? spawn("Xvfb", [":97", "-screen", "0", "1280x800x24"], { stdio: "ignore" }) : null;
+if (display) {
   process.env.DISPLAY = ":97";
   await new Promise((resolve) => setTimeout(resolve, 400));
 }
@@ -24,11 +26,12 @@ writeFileSync(
     allowed_origins: ["chrome-extension://jiobdbkfdjchlpmfmgkkmbgmkdmehjfe/"],
   }, null, 2),
 );
-const server = spawn("python3", ["-m", "http.server", "8766", "--bind", "127.0.0.1"], {
-  cwd: "/tmp/lt-fixture",
+const fixtureDir = path.join(tmpdir(), "lt-fixture");
+const server = spawn(process.platform === "win32" ? "py" : "python3", ["-m", "http.server", "8766", "--bind", "127.0.0.1"], {
+  cwd: fixtureDir,
   stdio: "ignore",
 });
-const chrome = spawn("google-chrome", [
+const chrome = spawn(chromeExecutable(), [
   `--user-data-dir=${userDataDir}`,
   "--no-first-run",
   "--remote-debugging-port=9343",
@@ -37,8 +40,8 @@ const chrome = spawn("google-chrome", [
   stdio: "ignore",
   env: {
     ...process.env,
-    LOCAL_TRANSLATE_STATE_DIR: "/tmp/lt-smoke-state",
-    LOCAL_TRANSLATE_DATA_DIR: "/tmp/lt-smoke-data",
+    LOCAL_TRANSLATE_STATE_DIR: path.join(tmpdir(), "lt-smoke-state"),
+    LOCAL_TRANSLATE_DATA_DIR: path.join(tmpdir(), "lt-smoke-data"),
   },
 });
 const deadline = Date.now() + 10000;

@@ -9,6 +9,7 @@ from pathlib import Path
 from local_translate.asr.speech_serve import SpeechServeProcess
 from local_translate.asr.whisper_backend import WhisperCppBackend
 from local_translate.asr.worker_client import SpeechWorkerClient
+from local_translate.backend_choice import speech_device_name, whisper_backend_name
 from local_translate.errors import CompanionError
 from local_translate.event_bus import EventBus
 from local_translate.gpu_detect import GpuInfo
@@ -39,19 +40,18 @@ class SpeechRuntime:
         self._lock = asyncio.Lock()
 
     def device_name(self) -> str:
-        backend = self.settings.data.get("gpu_backend", "auto")
-        if backend == "cpu":
-            return "cpu"
-        if backend == "vulkan" and self.gpu.vulkan_available:
-            return "gpu"
-        if self.gpu.experimental_igpu and self.settings.data.get("experimental_igpu") and self.gpu.vulkan_available:
-            return "gpu"
-        if backend == "auto" and self.gpu.vulkan_available and not self.gpu.experimental_igpu:
-            return "gpu"
-        return "cpu"
+        return speech_device_name(
+            self.settings.data.get("gpu_backend", "auto"),
+            self.gpu,
+            bool(self.settings.data.get("experimental_igpu")),
+        )
 
     def runtime_backend(self) -> str:
         return "vulkan" if self.device_name() == "gpu" else "cpu"
+
+    def whisper_runtime_backend(self) -> str:
+        """whisper.cpp backend. CUDA when llama.cpp would also use CUDA."""
+        return whisper_backend_name(self.settings.data.get("gpu_backend", "auto"), self.gpu)
 
     def active_catalog_name(self) -> str:
         engine = self.settings.data["asr_engine"]
@@ -110,7 +110,7 @@ class SpeechRuntime:
         record = self.registry.file_record(model_id)
         if not record:
             raise CompanionError("whisper_model_missing", "whisper モデルを先にダウンロードしてください", 409)
-        binary = await asyncio.to_thread(self.installer.ensure_whisper)
+        binary = await asyncio.to_thread(self.installer.ensure_whisper, backend=self.whisper_runtime_backend())
         backend = WhisperCppBackend(str(binary), __import__("pathlib").Path(record["path"]))
         return await backend.transcribe_pcm(pcm, sample_rate)
 

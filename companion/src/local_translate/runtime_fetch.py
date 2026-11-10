@@ -23,6 +23,14 @@ from local_translate.constants import (
     WHISPER_CPP_VERSION,
 )
 from local_translate.errors import CompanionError
+from local_translate.json_store import read_text_allowing_replace, replace_file_despite_open_readers
+
+
+def llama_cudart_asset_name(platform: str, backend: str) -> str | None:
+    """CUDA runtime DLLs for Windows. The llama CUDA zip does not ship them."""
+    if platform == "win32" and backend == "cuda":
+        return "cudart-llama-bin-win-cuda-12.4-x64.zip"
+    return None
 
 
 def llama_asset_name(platform: str, backend: str) -> str:
@@ -47,10 +55,21 @@ def speech_asset_name(platform: str, backend: str) -> str:
     return f"speech-{SPEECH_CPP_VERSION}-linux-x64-cpu.zip"
 
 
-def whisper_asset_name(platform: str) -> str:
+def whisper_asset_name(platform: str, backend: str = "cpu") -> str:
+    """Windows CUDA uses its own zip, which already contains the CUDA runtime DLLs."""
+    if platform == "win32" and backend == "cuda":
+        return "whisper-bin-win-cuda-12.4.0-x64.zip"
     if platform == "win32":
-        return f"whisper-bin-x64.zip"
+        return "whisper-bin-x64.zip"
     return "whisper-bin-ubuntu-x64.tar.gz"
+
+
+def whisper_install_dir(runtimes_dir: Path, platform: str, backend: str) -> Path:
+    """Windows keeps one directory per backend. Other platforms stay on the historical path."""
+    root = runtimes_dir / "whisper.cpp" / WHISPER_CPP_VERSION
+    if platform == "win32":
+        return root / ("cuda" if backend == "cuda" else "cpu")
+    return root
 
 
 def github_release_url(repo: str, tag: str, asset: str) -> str:
@@ -87,6 +106,11 @@ def extract_archive(archive: Path, destination: Path) -> None:
         package.extractall(destination, filter="data")
 
 
+def _runtime_digest_key(destination: Path, runtimes_dir: Path) -> str:
+    """Digest record key with forward slashes, so Windows and Linux share one spelling."""
+    return destination.relative_to(runtimes_dir).as_posix()
+
+
 def find_executable(root: Path, name: str) -> Path | None:
     candidates = [name, f"{name}.exe"]
     for candidate in candidates:
@@ -113,18 +137,26 @@ class RuntimeInstaller:
     def ensure_llama(self, backend: str, platform: str | None = None) -> Path:
         platform = platform or os.sys.platform
         destination = self.runtimes_dir / "llama.cpp" / LLAMA_CPP_VERSION / backend
-        key = str(destination.relative_to(self.runtimes_dir))
+        key = _runtime_digest_key(destination, self.runtimes_dir)
         binary = self._verified_binary(key, destination, "llama-server")
-        if binary:
+        cudart = llama_cudart_asset_name(platform, backend)
+        if binary and self._cuda_runtime_ready(destination, cudart):
             return binary
-        asset = llama_asset_name(platform, backend)
-        url = github_release_url(LLAMA_CPP_REPO, LLAMA_CPP_VERSION, asset)
-        return self._install(url, asset, destination, "llama-server", key)
+        if binary is None:
+            asset = llama_asset_name(platform, backend)
+            url = github_release_url(LLAMA_CPP_REPO, LLAMA_CPP_VERSION, asset)
+            binary = self._install(url, asset, destination, "llama-server", key)
+        if cudart and not self._cuda_runtime_ready(destination, cudart):
+            url = github_release_url(LLAMA_CPP_REPO, LLAMA_CPP_VERSION, cudart)
+            self._extract_verified_archive(url, cudart, destination)
+            if not self._cuda_runtime_ready(destination, cudart):
+                raise CompanionError("runtime_binary_missing", "cudart64_12.dll が CUDA ランタイムにありません")
+        return binary
 
     def ensure_speech(self, backend: str, platform: str | None = None) -> Path:
         platform = platform or os.sys.platform
         destination = self.runtimes_dir / "speech.cpp" / SPEECH_CPP_VERSION / backend
-        key = str(destination.relative_to(self.runtimes_dir))
+        key = _runtime_digest_key(destination, self.runtimes_dir)
         binary = self._verified_binary(key, destination, "speech")
         if binary:
             return binary
@@ -132,14 +164,14 @@ class RuntimeInstaller:
         url = github_release_url(SPEECH_CPP_REPO, f"v{SPEECH_CPP_VERSION}", asset)
         return self._install(url, asset, destination, "speech", key)
 
-    def ensure_whisper(self, platform: str | None = None) -> Path:
+    def ensure_whisper(self, platform: str | None = None, backend: str = "cpu") -> Path:
         platform = platform or os.sys.platform
-        root = self.runtimes_dir / "whisper.cpp" / WHISPER_CPP_VERSION
-        key = str(root.relative_to(self.runtimes_dir))
+        root = whisper_install_dir(self.runtimes_dir, platform, backend)
+        key = _runtime_digest_key(root, self.runtimes_dir)
         binary = self._verified_binary(key, root, "whisper-cli", alt_name="main")
         if binary:
             return binary
-        asset = whisper_asset_name(platform)
+        asset = whisper_asset_name(platform, backend)
         url = github_release_url(WHISPER_CPP_REPO, WHISPER_CPP_VERSION, asset)
         return self._install(url, asset, root, "whisper-cli", key, alt_name="main")
 
@@ -147,7 +179,7 @@ class RuntimeInstaller:
         if not self.digests_path.is_file():
             return {}
         try:
-            data = json.loads(self.digests_path.read_text(encoding="utf-8"))
+            data = json.loads(read_text_allowing_replace(self.digests_path))
         except (OSError, json.JSONDecodeError):
             return {}
         return data if isinstance(data, dict) else {}
@@ -163,7 +195,7 @@ class RuntimeInstaller:
         self.digests_path.parent.mkdir(parents=True, exist_ok=True)
         temporary = self.digests_path.with_suffix(".json.tmp")
         temporary.write_text(json.dumps(records, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
-        temporary.replace(self.digests_path)
+        replace_file_despite_open_readers(temporary, self.digests_path)
 
     def _verified_binary(self, key: str, destination: Path, binary_name: str, alt_name: str | None = None) -> Path | None:
         """Return the installed binary after checking it against the recorded digest, or None to install."""
@@ -185,10 +217,18 @@ class RuntimeInstaller:
             )
         return binary
 
-    def _install(self, url: str, asset: str, destination: Path, binary_name: str, key: str, alt_name: str | None = None) -> Path:
+    def _cuda_runtime_ready(self, destination: Path, asset: str | None) -> bool:
+        if not asset:
+            return True
+        return any(path.name == "cudart64_12.dll" for path in destination.rglob("cudart64_12.dll"))
+
+    def _extract_verified_archive(self, url: str, asset: str, destination: Path, key: str | None = None) -> str:
+        """Download an archive, check its SHA-256, and extract it. Returns the digest."""
         destination.mkdir(parents=True, exist_ok=True)
         archive = destination / asset
-        expected = RUNTIME_ASSET_SHA256.get(asset) or self._load_records().get(key, {}).get("archive_sha256") or None
+        expected = RUNTIME_ASSET_SHA256.get(asset)
+        if expected is None and key:
+            expected = self._load_records().get(key, {}).get("archive_sha256") or None
         try:
             self.opener(url, archive)
             actual = sha256_file(archive)
@@ -207,6 +247,10 @@ class RuntimeInstaller:
             raise
         except Exception as exc:
             raise CompanionError("runtime_download_failed", f"ランタイムを取得できません: {url} ({exc})") from exc
+        return actual
+
+    def _install(self, url: str, asset: str, destination: Path, binary_name: str, key: str, alt_name: str | None = None) -> Path:
+        actual = self._extract_verified_archive(url, asset, destination, key)
         binary = find_executable(destination, binary_name)
         if binary is None and alt_name:
             binary = find_executable(destination, alt_name)

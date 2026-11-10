@@ -12,11 +12,13 @@ from typing import AsyncIterator
 
 import aiohttp
 
+from local_translate.backend_choice import resolve_llama_backend
 from local_translate.constants import LLAMA_SERVER_ALIAS
 from local_translate.errors import CompanionError
 from local_translate.event_bus import EventBus
 from local_translate.gpu_detect import GpuInfo
 from local_translate.presets import get_preset
+from local_translate.process_spawn import create_hidden_subprocess
 from local_translate.runtime_fetch import RuntimeInstaller
 from local_translate.vram_presets import resolve_launch_numbers, suggest_runtime
 
@@ -184,11 +186,10 @@ class LlamaServerManager:
             if self.log_path:
                 self.log_path.parent.mkdir(parents=True, exist_ok=True)
                 log_handle = open(self.log_path, "ab")
-            self.process = await asyncio.create_subprocess_exec(
+            self.process = await create_hidden_subprocess(
                 *argv,
                 stdout=log_handle or asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.STDOUT if log_handle else asyncio.subprocess.DEVNULL,
-                start_new_session=True,
             )
             if log_handle:
                 log_handle.close()
@@ -205,17 +206,7 @@ class LlamaServerManager:
             self._ensure_idle_task()
 
     def _resolve_backend(self, gpu_backend: str) -> str:
-        if gpu_backend == "auto":
-            if self.gpu.cuda_available:
-                return "cuda"
-            if self.gpu.vulkan_available and (not self.gpu.experimental_igpu or self.gpu.backend == "vulkan"):
-                return "vulkan" if self.gpu.vulkan_available else "cpu"
-            return "cpu"
-        if gpu_backend == "cuda" and not self.gpu.cuda_available:
-            raise CompanionError("cuda_unavailable", "CUDA が検出できません")
-        if gpu_backend == "vulkan" and not self.gpu.vulkan_available:
-            raise CompanionError("vulkan_unavailable", "Vulkan が検出できません")
-        return gpu_backend
+        return resolve_llama_backend(gpu_backend, self.gpu)
 
     async def _wait_until_ready(self) -> None:
         assert self.port is not None

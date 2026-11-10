@@ -24,7 +24,9 @@ def read_wav_pcm(path: Path) -> tuple[bytes, int]:
 
 async def run_asr(speech_bin: str, model: str, wav_path: Path) -> tuple[str, float]:
     started = time.perf_counter()
-    process = await asyncio.create_subprocess_exec(
+    from local_translate.process_spawn import create_hidden_subprocess
+
+    process = await create_hidden_subprocess(
         speech_bin,
         "asr",
         model,
@@ -86,7 +88,7 @@ async def verify(speech_bin: str, samples: Path | None, references: Path | None,
                 }
             )
         if weights:
-            measured = errors / weights
+            measured = sum(errors) / weights
             report["cer"] = {
                 "measured": measured,
                 "nemo_reference": NEMO_CER_STRICT,
@@ -99,15 +101,82 @@ async def verify(speech_bin: str, samples: Path | None, references: Path | None,
     return report
 
 
+def latency_stats(values: list[float]) -> dict[str, float | int] | None:
+    """Mean and percentiles for a latency list. Empty input has no stats."""
+    if not values:
+        return None
+    ordered = sorted(values)
+
+    def percentile(fraction: float) -> float:
+        index = min(len(ordered) - 1, max(0, round((len(ordered) - 1) * fraction)))
+        return round(ordered[index], 3)
+
+    return {
+        "count": len(ordered),
+        "mean": round(sum(ordered) / len(ordered), 3),
+        "p50": percentile(0.50),
+        "p95": percentile(0.95),
+    }
+
+
+def wall_time_when_audio_sent(marks: list[tuple[float, float]], audio_sec: float) -> float | None:
+    """Wall time when audio_sec had been sent. marks are (audio_sec_sent, wall)."""
+    if not marks:
+        return None
+    chosen = marks[0][1]
+    for sent, wall in marks:
+        chosen = wall
+        if sent >= audio_sec:
+            return wall
+    return chosen
+
+
+def subtitle_final_latency_sec(
+    received_at: float,
+    *,
+    speech_sent_at: float,
+    utterance_end_sent_at: float | None = None,
+) -> float:
+    """Seconds from the utterance end to a translated final caption."""
+    origin = utterance_end_sent_at if utterance_end_sent_at is not None else speech_sent_at
+    return received_at - origin
+
+
+def summarize_asr_report(report: dict) -> dict:
+    """Aggregate CER and latency. The committed report must not contain transcripts."""
+    samples = report.get("samples") or []
+    latencies = [float(row["latency_sec"]) for row in samples if isinstance(row, dict) and "latency_sec" in row]
+    summary = {
+        "dataset": report.get("dataset"),
+        "license": report.get("license"),
+        "count": len(samples),
+        "cer": report.get("cer"),
+        "latency_sec": latency_stats(latencies),
+        "note": "認識全文と正解文は含めない。Haas-ja の公表 CER は jacer 正規化後の値であり、この cer.py とは直接比べられない。",
+    }
+    return {key: value for key, value in summary.items() if value is not None}
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Haas-ja speech.cpp の疎通と CER を記録する")
     parser.add_argument("--speech", required=True)
     parser.add_argument("--samples", type=Path)
     parser.add_argument("--references", type=Path)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--summary-only", action="store_true")
+    parser.add_argument("--detail", type=Path)
+    parser.add_argument("--dataset", default="")
+    parser.add_argument("--license", default="")
     args = parser.parse_args()
-    report = asyncio.run(verify(args.speech, args.samples, args.references, args.output))
-    print(json.dumps(report, ensure_ascii=False, indent=2))
+    report = asyncio.run(verify(args.speech, args.samples, args.references, args.detail or args.output))
+    if args.dataset:
+        report["dataset"] = args.dataset
+    if args.license:
+        report["license"] = args.license
+    payload = summarize_asr_report(report) if args.summary_only else report
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    args.output.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
 
 
 if __name__ == "__main__":

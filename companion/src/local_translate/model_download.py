@@ -99,7 +99,9 @@ class ModelDownloader:
 
     async def _speech_pull(self, catalog_name: str, model_id: str) -> None:
         binary = await self.speech_binary_getter()
-        process = await asyncio.create_subprocess_exec(
+        from local_translate.process_spawn import create_hidden_subprocess
+
+        process = await create_hidden_subprocess(
             binary,
             "pull",
             catalog_name,

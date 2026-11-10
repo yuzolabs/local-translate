@@ -1,8 +1,10 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { chromium, expect, test } from "@playwright/test";
+import { chromeExecutable, registerWindowsMockHost, shouldStartXvfb } from "./host-platform.mjs";
 
 const e2eDir = path.dirname(fileURLToPath(import.meta.url));
 const extensionDir = path.resolve(e2eDir, "../.output/chrome-mv3");
@@ -14,8 +16,13 @@ const mockPort = 9639 + (process.pid % 40);
 const mockToken = "mock-token";
 
 test("options page shows the local translation controls", async () => {
+  test.skip(
+    process.platform === "win32" && process.env.LT_E2E_NM_HOST !== "1",
+    "Windows の NM モック e2e は LT_E2E_NM_HOST=1 のときだけ実行します",
+  );
   const display = await ensureDisplay();
-  const userDataDir = path.join("/tmp", `lt-e2e-${process.pid}`);
+  const userDataDir = path.join(tmpdir(), `lt-e2e-${process.pid}`);
+  let restoreNativeHost = () => {};
   const port = 9400 + (process.pid % 200);
   const mockDaemon = mockMode
     ? spawn("node", [path.join(e2eDir, "mock-daemon.mjs")], {
@@ -24,7 +31,7 @@ test("options page shows the local translation controls", async () => {
       })
     : null;
   const chrome = spawn(
-    "google-chrome",
+    chromeExecutable(),
     [
       `--user-data-dir=${userDataDir}`,
       "--no-first-run",
@@ -43,7 +50,7 @@ test("options page shows the local translation controls", async () => {
     const browser = await chromium.connectOverCDP(`http://127.0.0.1:${port}`);
     const session = await browser.newBrowserCDPSession();
     const loaded = await session.send("Extensions.loadUnpacked", { path: extensionDir });
-    if (mockMode) registerMockHost(userDataDir, loaded.id);
+    if (mockMode) restoreNativeHost = registerMockHost(userDataDir, loaded.id);
     await session.send("Target.createTarget", { url: `chrome-extension://${loaded.id}/options.html` });
     const page = await waitForPage(browser, "options.html");
     await expect(page.getByRole("heading", { name: "試し翻訳" })).toBeVisible();
@@ -52,6 +59,7 @@ test("options page shows the local translation controls", async () => {
     if (mockMode) await exerciseMockFlows(page);
     await browser.close();
   } finally {
+    restoreNativeHost();
     chrome.kill();
     mockDaemon?.kill();
     display?.kill();
@@ -69,10 +77,11 @@ async function exerciseMockFlows(page): Promise<void> {
   await expect(page.locator(".preview")).toHaveText("モック訳", { timeout: 10000 });
 }
 
-function registerMockHost(userDataDir: string, extensionId: string): void {
+function registerMockHost(userDataDir: string, extensionId: string): () => void {
+  const hostScript = path.join(e2eDir, "nm-mock-host.py");
+  if (process.platform === "win32") return registerWindowsMockHost(hostScript, extensionId);
   const hostDir = path.join(userDataDir, "NativeMessagingHosts");
   mkdirSync(hostDir, { recursive: true });
-  const hostScript = path.join(e2eDir, "nm-mock-host.py");
   chmodSync(hostScript, 0o755);
   writeFileSync(
     path.join(hostDir, "com.localtranslate.host.json"),
@@ -88,6 +97,7 @@ function registerMockHost(userDataDir: string, extensionId: string): void {
       2,
     ),
   );
+  return () => {};
 }
 
 async function waitMockDaemon(): Promise<void> {
@@ -106,7 +116,7 @@ async function waitMockDaemon(): Promise<void> {
 }
 
 async function ensureDisplay(): Promise<ChildProcess | null> {
-  if (process.env.DISPLAY) return null;
+  if (!shouldStartXvfb()) return null;
   const xvfb = spawn("Xvfb", [":98", "-screen", "0", "1280x800x24"], { stdio: "ignore" });
   process.env.DISPLAY = ":98";
   await new Promise((resolve) => setTimeout(resolve, 400));

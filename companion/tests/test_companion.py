@@ -25,7 +25,13 @@ from local_translate.nm_framing import read_native_message, write_native_message
 from local_translate.paths import AppPaths, default_app_paths, resolve_data_dir, resolve_state_dir
 from local_translate.process_lock import ProcessLock
 from local_translate.prompt_builder import build_pfml3_prompt
-from local_translate.runtime_fetch import RuntimeInstaller, archive_bytes_for_tests, speech_asset_name
+from local_translate.runtime_fetch import (
+    RuntimeInstaller,
+    archive_bytes_for_tests,
+    llama_asset_name,
+    llama_cudart_asset_name,
+    speech_asset_name,
+)
 from local_translate.settings_store import SettingsStore, site_rule_for_host
 from local_translate.text_splitter import estimate_token_count, split_source_text
 from local_translate.vram_presets import suggest_runtime
@@ -126,12 +132,59 @@ def test_boot_applies_the_stored_parallel_to_the_translator(tmp_path: Path):
     assert state.translator.parallel_slots == 3
 
 
+def test_cuda_setting_uses_cuda_for_llama_and_vulkan_for_speech():
+    from local_translate.backend_choice import resolve_llama_backend, speech_device_name, whisper_backend_name
+
+    gpu = GpuInfo("cuda", "RTX", 16376, 14000, False, 32000, True, True)
+    assert resolve_llama_backend("cuda", gpu) == "cuda"
+    assert resolve_llama_backend("auto", gpu) == "cuda"
+    assert speech_device_name("cuda", gpu, False) == "gpu"
+    assert speech_device_name("cpu", gpu, False) == "cpu"
+    assert whisper_backend_name("cuda", gpu) == "cuda"
+    assert whisper_backend_name("auto", gpu) == "cuda"
+    assert whisper_backend_name("vulkan", gpu) == "cpu"
+    missing = GpuInfo("cpu", "none", None, None, False, 8000, False, False)
+    assert whisper_backend_name("cuda", missing) == "cpu"
+    assert whisper_backend_name("not-a-backend", missing) == "cpu"
+    no_vulkan = GpuInfo("cuda", "RTX", 16376, 14000, False, 32000, False, True)
+    assert speech_device_name("cuda", no_vulkan, False) == "cpu"
+
+
+@pytest.mark.asyncio
+async def test_install_runtime_requests_the_llama_cuda_build(tmp_path: Path):
+    paths = AppPaths.create(tmp_path / "state", tmp_path / "data")
+    state = AppState(paths)
+    state.gpu = GpuInfo("cuda", "RTX", 16376, 14000, False, 32000, True, True)
+    state.settings.update({"gpu_backend": "cuda"})
+    seen: dict[str, str] = {}
+
+    def ensure_llama(backend: str, platform: str | None = None) -> Path:
+        del platform
+        seen["llama"] = backend
+        return tmp_path / "llama-server"
+
+    state.installer.ensure_llama = ensure_llama
+    app = create_app(state)
+    async with TestClient(TestServer(app)) as client:
+        headers = {"Authorization": f"Bearer {state.token}"}
+        response = await client.post("/v1/runtimes/llama/install", headers=headers)
+        assert response.status == 200
+    assert seen["llama"] == "cuda"
+
+
 def test_vram_tiers():
     big = suggest_runtime(GpuInfo("cuda", "RTX", 24576, 20000, False, 32000, True, True))
     assert big.model_id == "plamo-3-translate-31b-GGUF-Q4_K_M"
     assert big.context_size == 16384
     mid = suggest_runtime(GpuInfo("cuda", "RTX", 16384, 14000, False, 32000, True, True))
-    assert "plamo-3-translate-31b-GGUF-Q3_K_M" in mid.alternatives
+    assert "plamo-3-translate-31b-GGUF-Q2_K" in mid.alternatives
+    reported_16gb = suggest_runtime(GpuInfo("cuda", "RTX 4070 Ti SUPER", 16376, 14000, False, 32000, True, True))
+    assert reported_16gb.model_id == "plamo-3-translate-8b-GGUF"
+    assert reported_16gb.context_size == 8192
+    assert "plamo-3-translate-31b-GGUF-Q2_K" in reported_16gb.alternatives
+    assert "plamo-3-translate-31b-GGUF-Q3_K_M" not in reported_16gb.alternatives
+    just_under = suggest_runtime(GpuInfo("cuda", "RTX", 16 * 1024 - 513, 10000, False, 32000, True, True))
+    assert "plamo-3-translate-31b-GGUF-Q2_K" not in just_under.alternatives
     small = suggest_runtime(GpuInfo("cpu", "CPU", None, None, False, 3000, False, False))
     assert small.model_id == "plamo-3-translate-0.8b-GGUF"
     assert small.n_gpu_layers == 0
@@ -628,6 +681,32 @@ def test_runtime_install_refuses_an_archive_that_does_not_match_the_pin(tmp_path
     assert not (destination / "speech").exists() and not (destination / "speech.exe").exists()
 
 
+def test_windows_cuda_llama_installs_cudart_beside_the_server(tmp_path, monkeypatch):
+    from local_translate import runtime_fetch
+
+    llama_asset = llama_asset_name("win32", "cuda")
+    cudart_asset = llama_cudart_asset_name("win32", "cuda")
+    assert cudart_asset
+    llama_zip = archive_bytes_for_tests(llama_asset, "llama-server.exe", b"server")
+    cudart_zip = archive_bytes_for_tests(cudart_asset, "cudart64_12.dll", b"cudart")
+    monkeypatch.setitem(runtime_fetch.RUNTIME_ASSET_SHA256, llama_asset, hashlib.sha256(llama_zip).hexdigest())
+    monkeypatch.setitem(runtime_fetch.RUNTIME_ASSET_SHA256, cudart_asset, hashlib.sha256(cudart_zip).hexdigest())
+    installer = _zip_installer(tmp_path)
+    seen: list[str] = []
+
+    def opener(url: str, destination: Path) -> None:
+        seen.append(url)
+        destination.write_bytes(cudart_zip if "cudart" in url else llama_zip)
+
+    installer.opener = opener
+    binary = installer.ensure_llama("cuda", "win32")
+    assert binary.name == "llama-server.exe"
+    assert (binary.parent / "cudart64_12.dll").is_file()
+    assert any("cudart" in url for url in seen)
+    installer.opener = lambda _url, _destination: (_ for _ in ()).throw(AssertionError("再取得しない"))
+    assert installer.ensure_llama("cuda", "win32") == binary
+
+
 def test_runtime_reuse_rechecks_the_recorded_digest(tmp_path, monkeypatch):
     from local_translate import runtime_fetch
     from local_translate.errors import CompanionError
@@ -653,6 +732,20 @@ def test_runtime_reuse_rechecks_the_recorded_digest(tmp_path, monkeypatch):
     assert not binary.exists()
 
 
+def test_windows_cuda_whisper_installs_into_its_own_directory(tmp_path, monkeypatch):
+    from local_translate import runtime_fetch
+    from local_translate.runtime_fetch import whisper_asset_name
+
+    asset = whisper_asset_name("win32", "cuda")
+    payload = archive_bytes_for_tests(asset, "whisper-cli.exe", b"cuda-whisper")
+    monkeypatch.setitem(runtime_fetch.RUNTIME_ASSET_SHA256, asset, hashlib.sha256(payload).hexdigest())
+    installer = _zip_installer(tmp_path)
+    installer.opener = lambda url, destination: destination.write_bytes(payload)
+    binary = installer.ensure_whisper("win32", "cuda")
+    assert binary.name == "whisper-cli.exe"
+    assert binary.parent.name == "cuda"
+
+
 def test_unpinned_runtime_records_the_first_download_and_rechecks_reinstalls(tmp_path, monkeypatch):
     from local_translate import runtime_fetch
     from local_translate.constants import WHISPER_CPP_VERSION
@@ -665,13 +758,342 @@ def test_unpinned_runtime_records_the_first_download_and_rechecks_reinstalls(tmp
     installer.opener = lambda url, destination: destination.write_bytes(payload)
     binary = installer.ensure_whisper("win32")
     digests = json.loads(installer.digests_path.read_text(encoding="utf-8"))
-    assert digests[f"whisper.cpp/{WHISPER_CPP_VERSION}"]["archive_sha256"] == hashlib.sha256(payload).hexdigest()
+    assert digests[f"whisper.cpp/{WHISPER_CPP_VERSION}/cpu"]["archive_sha256"] == hashlib.sha256(payload).hexdigest()
     binary.unlink()
     tampered = archive_bytes_for_tests(asset, "whisper-cli", b"payload-v2")
     installer.opener = lambda url, destination: destination.write_bytes(tampered)
     with pytest.raises(Exception) as excinfo:
         installer.ensure_whisper("win32")
     assert excinfo.value.code == "checksum_mismatch"
+
+
+def test_windows_vulkan_loader_counts_when_vulkaninfo_is_missing(monkeypatch):
+    if sys.platform != "win32":
+        pytest.skip("Windows の Vulkan ローダー検出です")
+    from local_translate.gpu_detect import detect_vulkan
+
+    monkeypatch.setattr("local_translate.gpu_detect.shutil.which", lambda _name: None)
+    available, name = detect_vulkan()
+    assert available is True
+    assert name is None
+
+
+def test_windows_detached_daemon_survives_a_job_that_forbids_breakaway():
+    if sys.platform != "win32":
+        pytest.skip("Windows のプロセス切り離しです")
+    import ctypes
+    import time
+
+    from local_translate.process_spawn import CREATE_NO_WINDOW, spawn_detached_daemon
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateJobObjectW.restype = ctypes.c_void_p
+    kernel32.OpenProcess.restype = ctypes.c_void_p
+    kernel32.OpenProcess.argtypes = [ctypes.c_ulong, ctypes.c_int, ctypes.c_ulong]
+
+    class IoCounters(ctypes.Structure):
+        _fields_ = [("count", ctypes.c_ulonglong)] * 6
+
+    class BasicLimit(ctypes.Structure):
+        _fields_ = [
+            ("PerProcessUserTimeLimit", ctypes.c_longlong),
+            ("PerJobUserTimeLimit", ctypes.c_longlong),
+            ("LimitFlags", ctypes.c_ulong),
+            ("MinimumWorkingSetSize", ctypes.c_size_t),
+            ("MaximumWorkingSetSize", ctypes.c_size_t),
+            ("ActiveProcessLimit", ctypes.c_ulong),
+            ("Affinity", ctypes.c_size_t),
+            ("PriorityClass", ctypes.c_ulong),
+            ("SchedulingClass", ctypes.c_ulong),
+        ]
+
+    class ExtendedLimit(ctypes.Structure):
+        _fields_ = [
+            ("Basic", BasicLimit),
+            ("IoInfo", IoCounters),
+            ("ProcessMemoryLimit", ctypes.c_size_t),
+            ("JobMemoryLimit", ctypes.c_size_t),
+            ("PeakProcessMemoryUsed", ctypes.c_size_t),
+            ("PeakJobMemoryUsed", ctypes.c_size_t),
+        ]
+
+    class StartupInfo(ctypes.Structure):
+        _fields_ = [
+            ("cb", ctypes.c_ulong),
+            ("lpReserved", ctypes.c_wchar_p),
+            ("lpDesktop", ctypes.c_wchar_p),
+            ("lpTitle", ctypes.c_wchar_p),
+            ("dwX", ctypes.c_ulong),
+            ("dwY", ctypes.c_ulong),
+            ("dwXSize", ctypes.c_ulong),
+            ("dwYSize", ctypes.c_ulong),
+            ("dwXCountChars", ctypes.c_ulong),
+            ("dwYCountChars", ctypes.c_ulong),
+            ("dwFillAttribute", ctypes.c_ulong),
+            ("dwFlags", ctypes.c_ulong),
+            ("wShowWindow", ctypes.c_ushort),
+            ("cbReserved2", ctypes.c_ushort),
+            ("lpReserved2", ctypes.c_void_p),
+            ("hStdInput", ctypes.c_void_p),
+            ("hStdOutput", ctypes.c_void_p),
+            ("hStdError", ctypes.c_void_p),
+        ]
+
+    class ProcessInformation(ctypes.Structure):
+        _fields_ = [
+            ("hProcess", ctypes.c_void_p),
+            ("hThread", ctypes.c_void_p),
+            ("dwProcessId", ctypes.c_ulong),
+            ("dwThreadId", ctypes.c_ulong),
+        ]
+
+    job = kernel32.CreateJobObjectW(None, None)
+    info = ExtendedLimit()
+    info.Basic.LimitFlags = 0x2000  # KILL_ON_JOB_CLOSE, breakaway は許さない
+    kernel32.SetInformationJobObject(ctypes.c_void_p(job), 9, ctypes.byref(info), ctypes.sizeof(info))
+    startup = StartupInfo()
+    startup.cb = ctypes.sizeof(startup)
+    created = ProcessInformation()
+    helper = tmp_path_script = None
+    import tempfile
+    from pathlib import Path
+
+    directory = Path(tempfile.mkdtemp())
+    pidfile = directory / "pid.txt"
+    helper = directory / "helper.py"
+    helper.write_text(
+        "from pathlib import Path\nimport sys\n"
+        "from local_translate.process_spawn import spawn_detached_daemon\n"
+        f"pid = spawn_detached_daemon([sys.executable, '-c', 'import time; time.sleep(30)'], Path(r'{directory}'))\n"
+        f"Path(r'{pidfile}').write_text(str(pid), encoding='utf-8')\n"
+        "import time; time.sleep(20)\n",
+        encoding="utf-8",
+    )
+    command = f'"{sys.executable}" "{helper}"'
+    kernel32.CreateProcessW(None, command, None, None, False, 0x00000004 | CREATE_NO_WINDOW, None, None, ctypes.byref(startup), ctypes.byref(created))
+    kernel32.AssignProcessToJobObject(ctypes.c_void_p(job), ctypes.c_void_p(created.hProcess))
+    kernel32.ResumeThread(ctypes.c_void_p(created.hThread))
+    deadline = time.monotonic() + 8
+    while time.monotonic() < deadline and not pidfile.exists():
+        time.sleep(0.1)
+    assert pidfile.exists(), "切り離したプロセスの pid が記録されませんでした"
+    grandchild = int(pidfile.read_text(encoding="utf-8"))
+    kernel32.CloseHandle(ctypes.c_void_p(created.hThread))
+    kernel32.CloseHandle(ctypes.c_void_p(created.hProcess))
+    kernel32.CloseHandle(ctypes.c_void_p(job))
+    time.sleep(0.6)
+    handle = kernel32.OpenProcess(0x1000, False, grandchild)
+    assert handle, "Job を閉じた後も daemon 相当のプロセスが残る必要があります"
+    code = ctypes.c_ulong()
+    kernel32.GetExitCodeProcess(ctypes.c_void_p(handle), ctypes.byref(code))
+    kernel32.CloseHandle(ctypes.c_void_p(handle))
+    assert code.value == 259
+    killer = kernel32.OpenProcess(0x0001, False, grandchild)
+    if killer:
+        kernel32.TerminateProcess(ctypes.c_void_p(killer), 1)
+        kernel32.CloseHandle(ctypes.c_void_p(killer))
+
+
+@pytest.mark.asyncio
+async def test_verify_references_summarizes_cer_without_transcripts(tmp_path: Path, monkeypatch):
+    from local_translate import asr_verify
+
+    async def fake_run_asr(speech_bin: str, model: str, wav_path: Path) -> tuple[str, float]:
+        del speech_bin, model, wav_path
+        return "秘密の字幕", 0.2
+
+    monkeypatch.setattr(asr_verify, "run_asr", fake_run_asr)
+    references = tmp_path / "references.jsonl"
+    references.write_text(
+        json.dumps({"wav": "a.wav", "text": "秘密の字幕"}, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    report = await asr_verify.verify("speech", None, references, tmp_path / "detail.json")
+    assert report["cer"]["measured"] == 0.0
+    summary = asr_verify.summarize_asr_report(report)
+    dumped = json.dumps(summary, ensure_ascii=False)
+    assert "秘密の字幕" not in dumped
+    assert "samples" not in summary
+    assert summary["cer"]["measured"] == 0.0
+
+
+@pytest.mark.asyncio
+async def test_subtitle_final_keeps_the_vad_end():
+    from local_translate.asr.speech_serve import RealtimeSubtitleBridge
+    from local_translate.event_bus import EventBus
+
+    bridge = RealtimeSubtitleBridge(1, None, EventBus())
+    assert await bridge._on_event({"type": "input_audio_buffer.speech_started", "audio_start_ms": 1396}) is None
+    assert await bridge._on_event({"type": "input_audio_buffer.speech_stopped", "audio_end_ms": 8396}) is None
+    caption = await bridge._on_event(
+        {"type": "conversation.item.input_audio_transcription.completed", "transcript": "こんにちは"}
+    )
+    assert caption["final"] is True
+    assert caption["end_ms"] == 8396
+    assert caption["start_ms"] == 1396
+
+
+def test_subtitle_final_latency_uses_the_sent_utterance_end():
+    from local_translate.asr_verify import subtitle_final_latency_sec, wall_time_when_audio_sent
+
+    marks = [(1.0, 11.0), (8.4, 19.5), (10.4, 21.6)]
+    assert wall_time_when_audio_sent(marks, 8.396) == 19.5
+    assert subtitle_final_latency_sec(20.1, speech_sent_at=21.6, utterance_end_sent_at=19.5) == pytest.approx(0.6)
+    assert subtitle_final_latency_sec(22.0, speech_sent_at=21.6) == pytest.approx(0.4)
+
+
+def test_codepoint_patch_and_asr_summary_omit_transcripts():
+    from local_translate.asr.transcript_patch import apply_codepoint_patch
+    from local_translate.asr_verify import summarize_asr_report
+
+    assert apply_codepoint_patch("abcdef", [[2, 4, "X"]]) == "abXef"
+    assert apply_codepoint_patch("abcdef", [[4, 5, ""], [1, 2, "Z"]]) == "aZcdf"
+    summary = summarize_asr_report(
+        {
+            "dataset": "FLEURS ja_jp test",
+            "license": "CC BY 4.0",
+            "samples": [{"reference": "秘密", "hypothesis": "秘密", "cer": 0.0, "latency_sec": 1.2}],
+            "cer": {"measured": 0.0},
+        }
+    )
+    assert summary["count"] == 1
+    assert "reference" not in json.dumps(summary, ensure_ascii=False)
+    assert "秘密" not in json.dumps(summary, ensure_ascii=False)
+
+
+def test_posix_detached_daemon_redirects_output_to_the_log(tmp_path: Path, monkeypatch):
+    import subprocess
+
+    from local_translate import process_spawn
+
+    captured: dict = {}
+
+    class FakeProcess:
+        pid = 42
+
+    def fake_popen(argv, **kwargs):
+        captured["argv"] = argv
+        captured["kwargs"] = kwargs
+        return FakeProcess()
+
+    monkeypatch.setattr(process_spawn.os, "name", "posix")
+    monkeypatch.setattr(process_spawn.subprocess, "Popen", fake_popen)
+    log_path = tmp_path / "daemon.log"
+    pid = process_spawn.spawn_detached_daemon(["python", "-m", "local_translate.daemon"], tmp_path, log_path)
+    assert pid == 42
+    assert captured["kwargs"]["stderr"] == subprocess.STDOUT
+    assert captured["kwargs"]["start_new_session"] is True
+    assert captured["kwargs"]["stdout"].name.replace("\\", "/").casefold() == str(log_path).replace("\\", "/").casefold()
+    assert captured["kwargs"]["stdout"].closed
+
+
+def test_posix_daemon_logging_keeps_stderr(tmp_path: Path, monkeypatch):
+    import logging
+
+    from local_translate import daemon
+
+    monkeypatch.setattr(daemon.os, "name", "posix")
+    previous_stderr = sys.stderr
+    root = logging.getLogger()
+    previous_handlers = root.handlers[:]
+    try:
+        daemon.configure_daemon_logging(tmp_path / "daemon.log")
+        assert sys.stderr is previous_stderr
+        assert not (tmp_path / "daemon.log").exists()
+    finally:
+        sys.stderr = previous_stderr
+        root.handlers = previous_handlers
+
+
+def test_daemon_log_keeps_japanese_as_utf8(tmp_path: Path):
+    import logging
+
+    from local_translate.daemon import attach_daemon_log
+
+    previous_stderr = sys.stderr
+    root = logging.getLogger()
+    previous_handlers = root.handlers[:]
+    path = tmp_path / "daemon.log"
+    try:
+        attach_daemon_log(path)
+        logging.getLogger("local_translate.daemon").info("日本語ログ")
+        sys.stderr.flush()
+        assert "日本語ログ" in path.read_text(encoding="utf-8")
+    finally:
+        sys.stderr = previous_stderr
+        root.handlers = previous_handlers
+
+
+def test_windows_detached_daemon_has_no_console_window(tmp_path: Path):
+    if sys.platform != "win32":
+        pytest.skip("Windows のコンソール窓の確認です")
+    import time
+
+    from local_translate.process_spawn import spawn_detached_daemon
+
+    probe = tmp_path / "console_probe.py"
+    child_probe = tmp_path / "child_probe.py"
+    result_path = tmp_path / "console.json"
+    child_probe.write_text(
+        "import ctypes\n"
+        "kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)\n"
+        "user32 = ctypes.WinDLL('user32', use_last_error=True)\n"
+        "kernel32.GetConsoleWindow.restype = ctypes.c_void_p\n"
+        "handle = kernel32.GetConsoleWindow() or 0\n"
+        "print(handle, bool(handle and user32.IsWindowVisible(ctypes.c_void_p(handle))))\n",
+        encoding="utf-8",
+    )
+    probe.write_text(
+        "import ctypes, json, subprocess, sys\n"
+        "from pathlib import Path\n"
+        "kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)\n"
+        "user32 = ctypes.WinDLL('user32', use_last_error=True)\n"
+        "kernel32.GetConsoleWindow.restype = ctypes.c_void_p\n"
+        f"grandchild = subprocess.run([sys.executable, r'{child_probe}'], capture_output=True, text=True)\n"
+        "own = kernel32.GetConsoleWindow() or 0\n"
+        f"Path(r'{result_path}').write_text(json.dumps({{\n"
+        "    'own_hwnd': own,\n"
+        "    'own_visible': bool(own and user32.IsWindowVisible(ctypes.c_void_p(own))),\n"
+        "    'child': grandchild.stdout.strip(),\n"
+        "}), encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+    spawn_detached_daemon([sys.executable, str(probe)], tmp_path)
+    deadline = time.monotonic() + 20
+    while time.monotonic() < deadline and not result_path.exists():
+        time.sleep(0.1)
+    assert result_path.exists(), "コンソール確認のプローブが結果を書きませんでした"
+    payload = json.loads(result_path.read_text(encoding="utf-8"))
+    assert payload["own_hwnd"] == 0
+    assert payload["own_visible"] is False
+    assert payload["child"].startswith("0 ")
+
+
+def test_windows_child_job_kills_the_process_when_closed():
+    if sys.platform != "win32":
+        pytest.skip("Windows の Job Object です")
+    import subprocess
+
+    from local_translate.process_spawn import CREATE_NO_WINDOW, ChildProcessJob
+
+    job = ChildProcessJob()
+    process = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"], creationflags=CREATE_NO_WINDOW)
+    job.assign(process.pid)
+    job.close()
+    process.wait(timeout=5)
+    assert process.returncode is not None
+
+
+def test_windows_reports_available_ram_and_resident_memory():
+    if sys.platform != "win32":
+        pytest.skip("Windows のメモリ取得です")
+    from local_translate.gpu_detect import available_ram_mb
+    from local_translate.http_api import resident_memory_mb
+
+    ram = available_ram_mb()
+    rss = resident_memory_mb()
+    assert isinstance(ram, int) and ram > 0
+    assert isinstance(rss, int) and rss > 0
 
 
 def test_data_dir_is_private_after_ensure(tmp_path: Path):
@@ -681,6 +1103,32 @@ def test_data_dir_is_private_after_ensure(tmp_path: Path):
     paths.ensure()
     assert (tmp_path / "state").stat().st_mode & 0o777 == 0o700
     assert (tmp_path / "data").stat().st_mode & 0o777 == 0o700
+
+
+@pytest.mark.asyncio
+async def test_whisper_passes_auto_language_to_the_cli(tmp_path: Path, monkeypatch):
+    from local_translate.asr.whisper_backend import WhisperCppBackend
+
+    seen: dict[str, tuple] = {}
+
+    class Finished:
+        returncode = 0
+
+        async def communicate(self):
+            return b"", b""
+
+    async def fake_exec(*argv, **kwargs):
+        del kwargs
+        seen["argv"] = argv
+        return Finished()
+
+    monkeypatch.setattr("local_translate.asr.whisper_backend.create_hidden_subprocess", fake_exec)
+    model = tmp_path / "whisper.bin"
+    model.write_bytes(b"ggml")
+    text = await WhisperCppBackend(sys.executable, model).transcribe_pcm(b"\x00\x00" * 16, language="auto")
+    assert text == ""
+    argv = seen["argv"]
+    assert argv[argv.index("-l") + 1] == "auto"
 
 
 @pytest.mark.asyncio

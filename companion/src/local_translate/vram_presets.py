@@ -1,10 +1,18 @@
-"""VRAM tier suggestions. 16 GB offers both 31B Q3 and 8B Q4; the caller picks."""
+"""VRAM tier suggestions. 16 GB offers both 31B Q2 and 8B Q4; the caller picks."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
 from local_translate.gpu_detect import GpuInfo
+
+# nvidia-smi reports a 16 GB card as 16376 MiB, short of 16 * 1024.
+VRAM_TIER_MARGIN_MB = 512
+
+
+def vram_reaches_tier(vram_mb: int, tier_gib: int) -> bool:
+    """True when reported VRAM reaches a marketed tier, allowing a 512 MiB shortfall."""
+    return vram_mb >= tier_gib * 1024 - VRAM_TIER_MARGIN_MB
 
 
 @dataclass(frozen=True)
@@ -21,7 +29,7 @@ def suggest_runtime(gpu: GpuInfo, idle_timeout_sec: int = 600) -> RuntimeSuggest
     del idle_timeout_sec
     vram = gpu.vram_total_mb or 0
     ram = gpu.available_ram_mb or 0
-    if gpu.backend == "cuda" and vram >= 24 * 1024:
+    if gpu.backend == "cuda" and vram_reaches_tier(vram, 24):
         return RuntimeSuggestion(
             "plamo-3-translate-31b-GGUF-Q4_K_M",
             16384,
@@ -29,16 +37,16 @@ def suggest_runtime(gpu: GpuInfo, idle_timeout_sec: int = 600) -> RuntimeSuggest
             2,
             "VRAM 24GB 以上のため 31B Q4_K_M とコンテキスト 16384 を提案します。",
         )
-    if vram >= 16 * 1024:
+    if vram_reaches_tier(vram, 16):
         return RuntimeSuggestion(
             "plamo-3-translate-8b-GGUF",
             8192,
             99,
             2,
-            "VRAM 16GB では 8B Q4_K_M、またはコンテキストを縮めた 31B Q3_K_M を選べます。",
-            ("plamo-3-translate-31b-GGUF-Q3_K_M",),
+            "VRAM 16GB では 8B Q4_K_M、または 31B Q2_K を選べます。",
+            ("plamo-3-translate-31b-GGUF-Q2_K",),
         )
-    if vram >= 12 * 1024:
+    if vram_reaches_tier(vram, 12):
         return RuntimeSuggestion(
             "plamo-3-translate-8b-GGUF",
             8192,
@@ -46,7 +54,7 @@ def suggest_runtime(gpu: GpuInfo, idle_timeout_sec: int = 600) -> RuntimeSuggest
             2,
             "VRAM 12GB 以上のため 8B Q4_K_M を提案します。",
         )
-    if gpu.experimental_igpu or gpu.backend in {"cpu", "vulkan"} or vram <= 8 * 1024:
+    if gpu.experimental_igpu or gpu.backend in {"cpu", "vulkan"} or vram <= 8 * 1024 + VRAM_TIER_MARGIN_MB:
         context = 2048 if ram and ram < 4096 else 4096
         ngl = 8 if gpu.experimental_igpu and gpu.vulkan_available else 0
         reason = "統合 GPU または CPU のため 0.8B Q4_K_M を提案します。"
