@@ -1,0 +1,15 @@
+{
+  "measured_at": "2026-11-10",
+  "device": "NVIDIA GeForce RTX 4070 Ti SUPER",
+  "runtime": "whisper.cpp b5454 win-cuda-12.4",
+  "model_id": "whisper-large-v3-turbo",
+  "backend": "cuda",
+  "cuda_device_log": "whisper_backend_init_gpu: using CUDA0 backend",
+  "language": "ja",
+  "dataset": "FLEURS ja_jp test, asr-ja-bench v1.1 fleurs",
+  "license": "CC BY 4.0",
+  "count": 30,
+  "cer": 0.0874,
+  "latency_sec": {"count": 30, "mean": 1.579, "p50": 1.567, "p95": 1.705},
+  "note": "認識全文は含めない。言語を ja と明示した。auto のままでは whisper-cli が英語として認識し、CER は使い物にならなかった。レイテンシはプロセス起動とモデル読み込みを含む。正規化は cer.py。"
+}
