@@ -674,6 +674,17 @@ def test_unpinned_runtime_records_the_first_download_and_rechecks_reinstalls(tmp
     assert excinfo.value.code == "checksum_mismatch"
 
 
+def test_windows_vulkan_loader_counts_when_vulkaninfo_is_missing(monkeypatch):
+    if sys.platform != "win32":
+        pytest.skip("Windows の Vulkan ローダー検出です")
+    from local_translate.gpu_detect import detect_vulkan
+
+    monkeypatch.setattr("local_translate.gpu_detect.shutil.which", lambda _name: None)
+    available, name = detect_vulkan()
+    assert available is True
+    assert name is None
+
+
 def test_windows_reports_available_ram_and_resident_memory():
     if sys.platform != "win32":
         pytest.skip("Windows のメモリ取得です")

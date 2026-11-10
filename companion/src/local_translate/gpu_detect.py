@@ -123,11 +123,22 @@ def detect_vulkan() -> tuple[bool, str | None]:
                 if "deviceName" in line or "GPU" in line:
                     name = line.split("=", 1)[-1].strip() or name
             return True, name
-    loader = any(
-        os.path.exists(path)
-        for path in ("/usr/lib/x86_64-linux-gnu/libvulkan.so.1", "/usr/lib/libvulkan.so.1", "/usr/lib64/libvulkan.so.1")
+    return _vulkan_loader_present(), None
+
+
+def _vulkan_loader_present() -> bool:
+    """True when a Vulkan loader library is installed, even if vulkaninfo is absent."""
+    linux_loaders = (
+        "/usr/lib/x86_64-linux-gnu/libvulkan.so.1",
+        "/usr/lib/libvulkan.so.1",
+        "/usr/lib64/libvulkan.so.1",
     )
-    return loader, None
+    if any(os.path.exists(path) for path in linux_loaders):
+        return True
+    if os.name != "nt":
+        return False
+    system_root = os.environ.get("SystemRoot", r"C:\Windows")
+    return os.path.exists(os.path.join(system_root, "System32", "vulkan-1.dll"))
 
 
 def detect_gpu() -> GpuInfo:
