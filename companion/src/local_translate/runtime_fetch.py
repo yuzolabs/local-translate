@@ -23,6 +23,7 @@ from local_translate.constants import (
     WHISPER_CPP_VERSION,
 )
 from local_translate.errors import CompanionError
+from local_translate.json_store import read_text_allowing_replace, replace_file_despite_open_readers
 
 
 def llama_asset_name(platform: str, backend: str) -> str:
@@ -152,7 +153,7 @@ class RuntimeInstaller:
         if not self.digests_path.is_file():
             return {}
         try:
-            data = json.loads(self.digests_path.read_text(encoding="utf-8"))
+            data = json.loads(read_text_allowing_replace(self.digests_path))
         except (OSError, json.JSONDecodeError):
             return {}
         return data if isinstance(data, dict) else {}
@@ -168,7 +169,7 @@ class RuntimeInstaller:
         self.digests_path.parent.mkdir(parents=True, exist_ok=True)
         temporary = self.digests_path.with_suffix(".json.tmp")
         temporary.write_text(json.dumps(records, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
-        temporary.replace(self.digests_path)
+        replace_file_despite_open_readers(temporary, self.digests_path)
 
     def _verified_binary(self, key: str, destination: Path, binary_name: str, alt_name: str | None = None) -> Path | None:
         """Return the installed binary after checking it against the recorded digest, or None to install."""

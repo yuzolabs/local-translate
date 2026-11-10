@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from local_translate.errors import CompanionError
+from local_translate.json_store import read_text_allowing_replace, replace_file_despite_open_readers
 from local_translate.presets import PRESETS, ModelPreset, get_preset
 
 
@@ -25,7 +26,7 @@ class ModelRegistry:
     def load(self) -> None:
         if not self.path.exists():
             return
-        stored = json.loads(self.path.read_text(encoding="utf-8"))
+        stored = json.loads(read_text_allowing_replace(self.path))
         if isinstance(stored, dict):
             self.data.update(stored)
 
@@ -35,7 +36,7 @@ class ModelRegistry:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             temporary = self.path.with_suffix(".json.tmp")
             temporary.write_text(json.dumps(self.data, ensure_ascii=False, indent=2), encoding="utf-8")
-            temporary.replace(self.path)
+            replace_file_despite_open_readers(temporary, self.path)
 
     def has_consent(self, model_id: str) -> bool:
         return model_id in self.data["consent"]
