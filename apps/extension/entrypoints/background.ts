@@ -1,4 +1,5 @@
 import { DaemonClient, type DaemonEndpoint } from "../lib/daemon-client";
+import { applyActionAppearance } from "../lib/action-appearance";
 import { NATIVE_HOST_NAME } from "../lib/identity";
 import { effectiveSettings, hostShouldAutoTranslate } from "../lib/site-settings";
 import { LruTranslationCache, translationCacheKey, type CacheStorage } from "../lib/translation-cache";
@@ -272,6 +273,7 @@ async function refreshUiState(): Promise<void> {
       settings: uiState.settings,
     };
   }
+  await applyActionAppearance(uiState);
   pushUiState();
 }
 
