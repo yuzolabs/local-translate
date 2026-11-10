@@ -106,8 +106,18 @@ async def serve(port: int = 0) -> None:
         lock.release()
 
 
+def attach_daemon_log(path) -> None:
+    """Append daemon logs as UTF-8. A detached Windows process cannot inherit the host's handles."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    stream = path.open("a", encoding="utf-8", errors="replace")
+    sys.stderr = stream
+    logging.basicConfig(level=logging.INFO, stream=stream, format="%(levelname)s %(name)s %(message)s", force=True)
+
+
 def main() -> None:
-    logging.basicConfig(level=logging.INFO, stream=sys.stderr, format="%(levelname)s %(name)s %(message)s")
+    from local_translate.paths import default_app_paths
+
+    attach_daemon_log(default_app_paths().daemon_log_path)
     parser = argparse.ArgumentParser(description="Local translation companion daemon")
     parser.add_argument("--port", type=int, default=0)
     args = parser.parse_args()

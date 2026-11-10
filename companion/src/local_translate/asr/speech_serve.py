@@ -14,6 +14,7 @@ import aiohttp
 from local_translate.asr.pcm import resample_pcm16
 from local_translate.errors import CompanionError
 from local_translate.event_bus import EventBus
+from local_translate.process_spawn import create_hidden_subprocess
 
 Translator = Callable[[str, list[dict[str, str]]], Awaitable[str]]
 
@@ -51,11 +52,10 @@ class SpeechServeProcess:
             self.log_path.parent.mkdir(parents=True, exist_ok=True)
             log_handle = open(self.log_path, "ab")
         try:
-            self.process = await asyncio.create_subprocess_exec(
+            self.process = await create_hidden_subprocess(
                 *argv,
                 stdout=log_handle or asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.STDOUT if log_handle else asyncio.subprocess.DEVNULL,
-                start_new_session=True,
             )
         finally:
             if log_handle:

@@ -737,6 +737,122 @@ def test_windows_vulkan_loader_counts_when_vulkaninfo_is_missing(monkeypatch):
     assert name is None
 
 
+def test_windows_detached_daemon_survives_a_job_that_forbids_breakaway():
+    if sys.platform != "win32":
+        pytest.skip("Windows のプロセス切り離しです")
+    import ctypes
+    import time
+
+    from local_translate.process_spawn import CREATE_NO_WINDOW, spawn_detached_daemon
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateJobObjectW.restype = ctypes.c_void_p
+    kernel32.OpenProcess.restype = ctypes.c_void_p
+    kernel32.OpenProcess.argtypes = [ctypes.c_ulong, ctypes.c_int, ctypes.c_ulong]
+
+    class IoCounters(ctypes.Structure):
+        _fields_ = [("count", ctypes.c_ulonglong)] * 6
+
+    class BasicLimit(ctypes.Structure):
+        _fields_ = [
+            ("PerProcessUserTimeLimit", ctypes.c_longlong),
+            ("PerJobUserTimeLimit", ctypes.c_longlong),
+            ("LimitFlags", ctypes.c_ulong),
+            ("MinimumWorkingSetSize", ctypes.c_size_t),
+            ("MaximumWorkingSetSize", ctypes.c_size_t),
+            ("ActiveProcessLimit", ctypes.c_ulong),
+            ("Affinity", ctypes.c_size_t),
+            ("PriorityClass", ctypes.c_ulong),
+            ("SchedulingClass", ctypes.c_ulong),
+        ]
+
+    class ExtendedLimit(ctypes.Structure):
+        _fields_ = [
+            ("Basic", BasicLimit),
+            ("IoInfo", IoCounters),
+            ("ProcessMemoryLimit", ctypes.c_size_t),
+            ("JobMemoryLimit", ctypes.c_size_t),
+            ("PeakProcessMemoryUsed", ctypes.c_size_t),
+            ("PeakJobMemoryUsed", ctypes.c_size_t),
+        ]
+
+    class StartupInfo(ctypes.Structure):
+        _fields_ = [
+            ("cb", ctypes.c_ulong),
+            ("lpReserved", ctypes.c_wchar_p),
+            ("lpDesktop", ctypes.c_wchar_p),
+            ("lpTitle", ctypes.c_wchar_p),
+            ("dwX", ctypes.c_ulong),
+            ("dwY", ctypes.c_ulong),
+            ("dwXSize", ctypes.c_ulong),
+            ("dwYSize", ctypes.c_ulong),
+            ("dwXCountChars", ctypes.c_ulong),
+            ("dwYCountChars", ctypes.c_ulong),
+            ("dwFillAttribute", ctypes.c_ulong),
+            ("dwFlags", ctypes.c_ulong),
+            ("wShowWindow", ctypes.c_ushort),
+            ("cbReserved2", ctypes.c_ushort),
+            ("lpReserved2", ctypes.c_void_p),
+            ("hStdInput", ctypes.c_void_p),
+            ("hStdOutput", ctypes.c_void_p),
+            ("hStdError", ctypes.c_void_p),
+        ]
+
+    class ProcessInformation(ctypes.Structure):
+        _fields_ = [
+            ("hProcess", ctypes.c_void_p),
+            ("hThread", ctypes.c_void_p),
+            ("dwProcessId", ctypes.c_ulong),
+            ("dwThreadId", ctypes.c_ulong),
+        ]
+
+    job = kernel32.CreateJobObjectW(None, None)
+    info = ExtendedLimit()
+    info.Basic.LimitFlags = 0x2000  # KILL_ON_JOB_CLOSE, breakaway は許さない
+    kernel32.SetInformationJobObject(ctypes.c_void_p(job), 9, ctypes.byref(info), ctypes.sizeof(info))
+    startup = StartupInfo()
+    startup.cb = ctypes.sizeof(startup)
+    created = ProcessInformation()
+    helper = tmp_path_script = None
+    import tempfile
+    from pathlib import Path
+
+    directory = Path(tempfile.mkdtemp())
+    pidfile = directory / "pid.txt"
+    helper = directory / "helper.py"
+    helper.write_text(
+        "from pathlib import Path\nimport sys\n"
+        "from local_translate.process_spawn import spawn_detached_daemon\n"
+        f"pid = spawn_detached_daemon([sys.executable, '-c', 'import time; time.sleep(30)'], Path(r'{directory}'))\n"
+        f"Path(r'{pidfile}').write_text(str(pid), encoding='utf-8')\n"
+        "import time; time.sleep(20)\n",
+        encoding="utf-8",
+    )
+    command = f'"{sys.executable}" "{helper}"'
+    kernel32.CreateProcessW(None, command, None, None, False, 0x00000004 | CREATE_NO_WINDOW, None, None, ctypes.byref(startup), ctypes.byref(created))
+    kernel32.AssignProcessToJobObject(ctypes.c_void_p(job), ctypes.c_void_p(created.hProcess))
+    kernel32.ResumeThread(ctypes.c_void_p(created.hThread))
+    deadline = time.monotonic() + 8
+    while time.monotonic() < deadline and not pidfile.exists():
+        time.sleep(0.1)
+    assert pidfile.exists(), "切り離したプロセスの pid が記録されませんでした"
+    grandchild = int(pidfile.read_text(encoding="utf-8"))
+    kernel32.CloseHandle(ctypes.c_void_p(created.hThread))
+    kernel32.CloseHandle(ctypes.c_void_p(created.hProcess))
+    kernel32.CloseHandle(ctypes.c_void_p(job))
+    time.sleep(0.6)
+    handle = kernel32.OpenProcess(0x1000, False, grandchild)
+    assert handle, "Job を閉じた後も daemon 相当のプロセスが残る必要があります"
+    code = ctypes.c_ulong()
+    kernel32.GetExitCodeProcess(ctypes.c_void_p(handle), ctypes.byref(code))
+    kernel32.CloseHandle(ctypes.c_void_p(handle))
+    assert code.value == 259
+    killer = kernel32.OpenProcess(0x0001, False, grandchild)
+    if killer:
+        kernel32.TerminateProcess(ctypes.c_void_p(killer), 1)
+        kernel32.CloseHandle(ctypes.c_void_p(killer))
+
+
 def test_windows_reports_available_ram_and_resident_memory():
     if sys.platform != "win32":
         pytest.skip("Windows のメモリ取得です")

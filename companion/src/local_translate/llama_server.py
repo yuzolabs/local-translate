@@ -17,6 +17,7 @@ from local_translate.errors import CompanionError
 from local_translate.event_bus import EventBus
 from local_translate.gpu_detect import GpuInfo
 from local_translate.presets import get_preset
+from local_translate.process_spawn import create_hidden_subprocess
 from local_translate.runtime_fetch import RuntimeInstaller
 from local_translate.vram_presets import resolve_launch_numbers, suggest_runtime
 
@@ -184,11 +185,10 @@ class LlamaServerManager:
             if self.log_path:
                 self.log_path.parent.mkdir(parents=True, exist_ok=True)
                 log_handle = open(self.log_path, "ab")
-            self.process = await asyncio.create_subprocess_exec(
+            self.process = await create_hidden_subprocess(
                 *argv,
                 stdout=log_handle or asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.STDOUT if log_handle else asyncio.subprocess.DEVNULL,
-                start_new_session=True,
             )
             if log_handle:
                 log_handle.close()

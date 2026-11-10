@@ -8,6 +8,7 @@ from pathlib import Path
 
 from local_translate.asr.silero_vad import write_pcm16_wav
 from local_translate.errors import CompanionError
+from local_translate.process_spawn import create_hidden_subprocess
 
 
 class WhisperCppBackend:
@@ -39,7 +40,7 @@ class WhisperCppBackend:
             ]
             if language and language != "auto":
                 argv.extend(["-l", language])
-            process = await asyncio.create_subprocess_exec(
+            process = await create_hidden_subprocess(
                 *argv,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,

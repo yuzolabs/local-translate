@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from local_translate.errors import CompanionError
+from local_translate.process_spawn import create_hidden_subprocess
 
 
 class SpeechWorkerClient:
@@ -35,7 +36,7 @@ class SpeechWorkerClient:
             self.log_path.parent.mkdir(parents=True, exist_ok=True)
             log_handle = open(self.log_path, "ab")
         try:
-            self.process = await asyncio.create_subprocess_exec(
+            self.process = await create_hidden_subprocess(
                 self.binary,
                 "worker",
                 self.model,

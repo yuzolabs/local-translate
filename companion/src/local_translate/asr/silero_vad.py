@@ -27,7 +27,9 @@ async def silero_regions(
     *,
     min_silence_ms: int = 500,
 ) -> list[dict[str, float]]:
-    process = await asyncio.create_subprocess_exec(
+    from local_translate.process_spawn import create_hidden_subprocess
+
+    process = await create_hidden_subprocess(
         speech_bin,
         "vad",
         "silero-vad",

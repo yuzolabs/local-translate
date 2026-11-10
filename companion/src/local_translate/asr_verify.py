@@ -24,7 +24,9 @@ def read_wav_pcm(path: Path) -> tuple[bytes, int]:
 
 async def run_asr(speech_bin: str, model: str, wav_path: Path) -> tuple[str, float]:
     started = time.perf_counter()
-    process = await asyncio.create_subprocess_exec(
+    from local_translate.process_spawn import create_hidden_subprocess
+
+    process = await create_hidden_subprocess(
         speech_bin,
         "asr",
         model,

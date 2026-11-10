@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import logging
-import subprocess
 import sys
 import time
 import urllib.error
@@ -14,6 +13,7 @@ from pathlib import Path
 from local_translate.constants import APP_VERSION
 from local_translate.nm_framing import read_stdin_message, write_stdout_message
 from local_translate.paths import default_app_paths
+from local_translate.process_spawn import spawn_detached_daemon
 from local_translate.token_store import load_or_create_token
 
 log = logging.getLogger("local_translate.nm_host")
@@ -50,13 +50,10 @@ def ensure_daemon(python: str | None = None) -> tuple[int, str]:
     if port and daemon_healthy(port, token):
         return port, token
     executable = python or sys.executable
-    log_handle = open(paths.daemon_log_path, "ab")
-    subprocess.Popen(
+    # 切り離したプロセスには標準出力を渡せない。daemon が自分でログを開く。
+    spawn_detached_daemon(
         [executable, "-m", "local_translate.daemon"],
-        stdout=log_handle,
-        stderr=subprocess.STDOUT,
-        start_new_session=True,
-        cwd=str(Path(__file__).resolve().parents[2]),
+        Path(__file__).resolve().parents[2],
     )
     deadline = time.monotonic() + 20
     while time.monotonic() < deadline:
