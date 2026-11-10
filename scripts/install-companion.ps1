@@ -1,4 +1,4 @@
-# Windows setup for the companion. Syncs the virtualenv, then registers native messaging.
+﻿# Windows setup for the companion. Syncs the virtualenv, then registers native messaging.
 # Registry registration changes HKCU, so it asks before writing unless -Yes is passed.
 param(
     [string]$HostPath = "",
@@ -14,6 +14,9 @@ if (-not $HostPath) {
 Push-Location (Join-Path $root "companion")
 try {
     uv sync --all-groups
+    if ($LASTEXITCODE -ne 0) {
+        throw "uv sync --all-groups が失敗しました (exit $LASTEXITCODE)"
+    }
 } finally {
     Pop-Location
 }
@@ -21,8 +24,16 @@ if (-not (Test-Path $HostPath)) {
     throw "ホスト実行ファイルがありません: $HostPath"
 }
 
+$identity = Get-Content -Raw (Join-Path $root "shared/extension-identity.json") | ConvertFrom-Json
+$registryKeys = @(
+    "HKCU:\Software\Google\Chrome\NativeMessagingHosts\$($identity.hostName)",
+    "HKCU:\Software\Chromium\NativeMessagingHosts\$($identity.hostName)",
+    "HKCU:\Software\Microsoft\Edge\NativeMessagingHosts\$($identity.hostName)"
+)
 if (-not $Yes) {
-    $answer = Read-Host "HKCU に Native Messaging ホストを登録します。続行しますか? [y/N]"
+    Write-Output "登録するホスト: $HostPath"
+    $registryKeys | ForEach-Object { Write-Output "登録先: $_" }
+    $answer = Read-Host "これらの HKCU キーへ Native Messaging ホストを登録します。続行しますか? [y/N]"
     if ($answer -notin @("y", "Y")) {
         throw "登録を中止しました"
     }

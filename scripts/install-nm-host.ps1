@@ -1,4 +1,4 @@
-# Register the native-messaging host for Chrome, Chromium, and Edge on Windows.
+﻿# Register the native-messaging host for Chrome, Chromium, and Edge on Windows.
 # Usage: powershell -File scripts/install-nm-host.ps1 -HostPath C:\path\to\local-translate-host.exe
 param(
     [Parameter(Mandatory = $true)]
