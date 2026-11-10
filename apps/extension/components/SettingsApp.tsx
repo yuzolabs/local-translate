@@ -266,6 +266,8 @@ export function SettingsApp() {
 function ModelLine({ model, onChange }: { model: ModelRow; onChange: () => void }) {
   const [license, setLicense] = useState<LicenseView | null>(null);
   const [licenseError, setLicenseError] = useState("");
+  const [actionError, setActionError] = useState("");
+  const [busyAction, setBusyAction] = useState("");
 
   async function showLicense(): Promise<void> {
     setLicenseError("");
@@ -277,11 +279,34 @@ function ModelLine({ model, onChange }: { model: ModelRow; onChange: () => void 
     setLicense(response);
   }
 
+  // 「使う」は llama-server の起動待ち（31B では数秒以上）、「ダウンロード」は開始まで
+  // 時間がかかる。押している間は行内に状況を出し、background が返す { error } を捨てない。
+  async function run(action: "consent" | "download-model" | "activate-model"): Promise<void> {
+    setBusyAction(action);
+    setActionError("");
+    try {
+      const response = (await chrome.runtime.sendMessage({ type: action, modelId: model.id })) as
+        | { error?: string }
+        | undefined;
+      if (response && typeof response === "object" && response.error) {
+        setActionError(response.error);
+        return;
+      }
+      onChange();
+    } finally {
+      setBusyAction("");
+    }
+  }
+
+  const busyNote = busyAction === "activate-model" ? "切り替え中…" : busyAction === "download-model" ? "ダウンロードを開始しています…" : busyAction === "consent" ? "記録しています…" : "";
+
   return (
     <div class="model">
       <div>
         <strong>{model.id}</strong>
         <div class="note">{model.note} / {model.status}{model.progress ? ` ${Math.round((model.progress ?? 0) * 100)}%` : ""}</div>
+        {busyNote && <div class="note">{busyNote}</div>}
+        {actionError && <div class="fault">{actionError}</div>}
         {license && (
           <div class="note">
             <div>{license.name}</div>
@@ -293,14 +318,14 @@ function ModelLine({ model, onChange }: { model: ModelRow; onChange: () => void 
         {licenseError && <div class="fault">{licenseError}</div>}
       </div>
       <div class="inline">
-        {!model.consented && <button type="button" onClick={() => void showLicense()}>ライセンスを見る</button>}
+        {!model.consented && <button type="button" disabled={Boolean(busyAction)} onClick={() => void showLicense()}>ライセンスを見る</button>}
         {!model.consented && license && (
-          <button type="button" onClick={() => void chrome.runtime.sendMessage({ type: "consent", modelId: model.id }).then(onChange)}>同意して記録する</button>
+          <button type="button" disabled={Boolean(busyAction)} onClick={() => void run("consent")}>同意して記録する</button>
         )}
         {model.consented && model.status !== "ready" && model.status !== "running" && (
-          <button type="button" onClick={() => void chrome.runtime.sendMessage({ type: "download-model", modelId: model.id }).then(onChange)}>ダウンロード</button>
+          <button type="button" disabled={Boolean(busyAction)} onClick={() => void run("download-model")}>ダウンロード</button>
         )}
-        <button type="button" onClick={() => void chrome.runtime.sendMessage({ type: "activate-model", modelId: model.id }).then(onChange)}>使う</button>
+        <button type="button" disabled={Boolean(busyAction)} onClick={() => void run("activate-model")}>使う</button>
       </div>
     </div>
   );
