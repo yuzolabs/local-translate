@@ -111,6 +111,7 @@ class RealtimeSubtitleBridge:
         self._item_id: str | None = None
         self._start_ms = 0
         self._history: list[dict[str, str]] = []
+        self._end_ms: int | None = None
 
     async def run(self, pcm_queue: asyncio.Queue[bytes | None], caption_callback) -> None:
         url = f"http://127.0.0.1:{self.port}/v1/realtime"
@@ -164,8 +165,12 @@ class RealtimeSubtitleBridge:
         event_type = payload.get("type")
         if event_type == "input_audio_buffer.speech_started":
             self._interim = ""
+            self._end_ms = None
             self._item_id = payload.get("item_id")
             self._start_ms = int(payload.get("audio_start_ms") or 0)
+            return None
+        if event_type == "input_audio_buffer.speech_stopped":
+            self._end_ms = int(payload.get("audio_end_ms") or 0) or None
             return None
         if event_type == "conversation.item.input_audio_transcription.delta":
             self._interim += str(payload.get("delta") or "")
@@ -194,7 +199,7 @@ class RealtimeSubtitleBridge:
             return {
                 "seq": self._seq,
                 "start_ms": self._start_ms,
-                "end_ms": int(payload.get("audio_end_ms") or 0) or None,
+                "end_ms": self._end_ms,
                 "text": text,
                 "translation": translation,
                 "final": True,

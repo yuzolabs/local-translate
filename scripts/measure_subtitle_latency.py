@@ -16,7 +16,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "companion" / "src"))
-from local_translate.asr_verify import latency_stats, subtitle_final_latency_sec
+from local_translate.asr_verify import latency_stats, subtitle_final_latency_sec, wall_time_when_audio_sent
 
 import aiohttp
 
@@ -43,11 +43,17 @@ async def measure_one(session: aiohttp.ClientSession, url: str, token: str, pcm:
         chunk = 16000 * 2 // 10
         silence = b"\x00\x00" * int(16000 * 0.8)
 
+        marks: list[tuple[float, float]] = []
+
         async def send() -> None:
             nonlocal speech_end, send_started
             send_started = time.perf_counter()
+            sent = 0.0
             for offset in range(0, len(pcm), chunk):
-                await socket.send_bytes(pcm[offset : offset + chunk])
+                piece = pcm[offset : offset + chunk]
+                await socket.send_bytes(piece)
+                sent += len(piece) / 2 / 16000
+                marks.append((sent, time.perf_counter()))
                 await asyncio.sleep(0.1)
             speech_end = time.perf_counter()
             for offset in range(0, len(silence), chunk):
@@ -56,18 +62,14 @@ async def measure_one(session: aiohttp.ClientSession, url: str, token: str, pcm:
 
         sender = asyncio.create_task(send())
         finals: list[tuple[float, dict]] = []
-        deadline = time.perf_counter() + 120 + len(pcm) / (16000 * 2)
-        grace_deadline = None
+        deadline = time.perf_counter() + 30 + len(pcm) / (16000 * 2)
         while time.perf_counter() < deadline:
-            if sender.done() and grace_deadline is None:
-                grace_deadline = time.perf_counter() + 8
-            if grace_deadline is not None and time.perf_counter() >= grace_deadline:
+            if sender.done() and finals and speech_end:
                 break
-            timeout = max(0.2, deadline - time.perf_counter())
-            if grace_deadline is not None:
-                timeout = min(timeout, max(0.2, grace_deadline - time.perf_counter()))
+            if sender.done() and speech_end and time.perf_counter() >= speech_end + 8:
+                break
             try:
-                message = await asyncio.wait_for(socket.receive(), timeout=timeout)
+                message = await asyncio.wait_for(socket.receive(), timeout=0.5)
             except TimeoutError:
                 continue
             if message.type != aiohttp.WSMsgType.TEXT:
@@ -77,17 +79,22 @@ async def measure_one(session: aiohttp.ClientSession, url: str, token: str, pcm:
             payload = json.loads(message.data)
             if payload.get("final"):
                 finals.append((time.perf_counter(), payload))
-        await sender
+        if not sender.done():
+            sender.cancel()
+        else:
+            await sender
         if not finals:
             raise SystemExit("確定字幕が返りませんでした")
-        chosen = finals[-1][1]
+        chosen_at, chosen = finals[-1]
+        end_ms = chosen.get("end_ms")
+        utterance_end_sent_at = None
+        if isinstance(end_ms, (int, float)) and end_ms > 0:
+            utterance_end_sent_at = wall_time_when_audio_sent(marks, end_ms / 1000)
         latency = subtitle_final_latency_sec(
-            send_started,
-            speech_end,
-            [(received, payload.get("end_ms")) for received, payload in finals],
+            chosen_at,
+            speech_sent_at=speech_end or chosen_at,
+            utterance_end_sent_at=utterance_end_sent_at,
         )
-        if latency is None:
-            raise SystemExit("確定字幕のレイテンシを計算できませんでした")
         return {
             "audio_sec": round(len(pcm) / (16000 * 2), 3),
             "latency_sec": round(latency, 3),
@@ -120,7 +127,7 @@ def summary(results: list[dict], manifest: dict) -> dict:
         "count": len(results),
         "latency_sec": latency_stats([row["latency_sec"] for row in results]),
         "translated": sum(1 for row in results if row["has_translation"]),
-        "note": "認識全文と訳文は含めない。レイテンシは発話終端から、翻訳を含む確定字幕まで。WAV 内の無音で終わった場合は確定の end_ms を終端にする。",
+        "note": "認識全文と訳文は含めない。レイテンシは、VAD が返した発話終端の音声を送り終えた時刻から、翻訳を含む確定字幕まで。",
     }
 
 

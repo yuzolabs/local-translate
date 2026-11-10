@@ -917,12 +917,29 @@ async def test_verify_references_summarizes_cer_without_transcripts(tmp_path: Pa
     assert summary["cer"]["measured"] == 0.0
 
 
-def test_subtitle_final_latency_uses_silence_close_or_audio_end():
-    from local_translate.asr_verify import subtitle_final_latency_sec
+@pytest.mark.asyncio
+async def test_subtitle_final_keeps_the_vad_end():
+    from local_translate.asr.speech_serve import RealtimeSubtitleBridge
+    from local_translate.event_bus import EventBus
 
-    assert subtitle_final_latency_sec(10.0, 12.0, [(12.4, 11000)]) == pytest.approx(0.4)
-    assert subtitle_final_latency_sec(10.0, 20.0, [(15.0, 4000)]) == pytest.approx(1.0)
-    assert subtitle_final_latency_sec(10.0, 20.0, []) is None
+    bridge = RealtimeSubtitleBridge(1, None, EventBus())
+    assert await bridge._on_event({"type": "input_audio_buffer.speech_started", "audio_start_ms": 1396}) is None
+    assert await bridge._on_event({"type": "input_audio_buffer.speech_stopped", "audio_end_ms": 8396}) is None
+    caption = await bridge._on_event(
+        {"type": "conversation.item.input_audio_transcription.completed", "transcript": "こんにちは"}
+    )
+    assert caption["final"] is True
+    assert caption["end_ms"] == 8396
+    assert caption["start_ms"] == 1396
+
+
+def test_subtitle_final_latency_uses_the_sent_utterance_end():
+    from local_translate.asr_verify import subtitle_final_latency_sec, wall_time_when_audio_sent
+
+    marks = [(1.0, 11.0), (8.4, 19.5), (10.4, 21.6)]
+    assert wall_time_when_audio_sent(marks, 8.396) == 19.5
+    assert subtitle_final_latency_sec(20.1, speech_sent_at=21.6, utterance_end_sent_at=19.5) == pytest.approx(0.6)
+    assert subtitle_final_latency_sec(22.0, speech_sent_at=21.6) == pytest.approx(0.4)
 
 
 def test_codepoint_patch_and_asr_summary_omit_transcripts():

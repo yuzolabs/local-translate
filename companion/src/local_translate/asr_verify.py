@@ -119,26 +119,27 @@ def latency_stats(values: list[float]) -> dict[str, float | int] | None:
     }
 
 
-def subtitle_final_latency_sec(
-    send_started: float,
-    speech_sent: float,
-    finals: list[tuple[float, float | None]],
-) -> float | None:
-    """Seconds from the utterance end to a translated final caption.
-
-    A final received after the wav has been sent was closed by the added silence.
-    If the wav already contained that silence, the utterance end is the caption's
-    end_ms on the realtime send clock.
-    """
-    if not finals:
+def wall_time_when_audio_sent(marks: list[tuple[float, float]], audio_sec: float) -> float | None:
+    """Wall time when audio_sec had been sent. marks are (audio_sec_sent, wall)."""
+    if not marks:
         return None
-    after_speech = [item for item in finals if item[0] >= speech_sent]
-    if after_speech:
-        return after_speech[0][0] - speech_sent
-    received_at, end_ms = finals[-1]
-    if end_ms and end_ms > 0:
-        return received_at - (send_started + end_ms / 1000)
-    return received_at - speech_sent
+    chosen = marks[0][1]
+    for sent, wall in marks:
+        chosen = wall
+        if sent >= audio_sec:
+            return wall
+    return chosen
+
+
+def subtitle_final_latency_sec(
+    received_at: float,
+    *,
+    speech_sent_at: float,
+    utterance_end_sent_at: float | None = None,
+) -> float:
+    """Seconds from the utterance end to a translated final caption."""
+    origin = utterance_end_sent_at if utterance_end_sent_at is not None else speech_sent_at
+    return received_at - origin
 
 
 def summarize_asr_report(report: dict) -> dict:
