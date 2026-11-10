@@ -25,7 +25,13 @@ from local_translate.nm_framing import read_native_message, write_native_message
 from local_translate.paths import AppPaths, default_app_paths, resolve_data_dir, resolve_state_dir
 from local_translate.process_lock import ProcessLock
 from local_translate.prompt_builder import build_pfml3_prompt
-from local_translate.runtime_fetch import RuntimeInstaller, archive_bytes_for_tests, speech_asset_name
+from local_translate.runtime_fetch import (
+    RuntimeInstaller,
+    archive_bytes_for_tests,
+    llama_asset_name,
+    llama_cudart_asset_name,
+    speech_asset_name,
+)
 from local_translate.settings_store import SettingsStore, site_rule_for_host
 from local_translate.text_splitter import estimate_token_count, split_source_text
 from local_translate.vram_presets import suggest_runtime
@@ -632,6 +638,32 @@ def test_runtime_install_refuses_an_archive_that_does_not_match_the_pin(tmp_path
     assert excinfo.value.code == "checksum_mismatch"
     assert not (destination / asset).exists()
     assert not (destination / "speech").exists() and not (destination / "speech.exe").exists()
+
+
+def test_windows_cuda_llama_installs_cudart_beside_the_server(tmp_path, monkeypatch):
+    from local_translate import runtime_fetch
+
+    llama_asset = llama_asset_name("win32", "cuda")
+    cudart_asset = llama_cudart_asset_name("win32", "cuda")
+    assert cudart_asset
+    llama_zip = archive_bytes_for_tests(llama_asset, "llama-server.exe", b"server")
+    cudart_zip = archive_bytes_for_tests(cudart_asset, "cudart64_12.dll", b"cudart")
+    monkeypatch.setitem(runtime_fetch.RUNTIME_ASSET_SHA256, llama_asset, hashlib.sha256(llama_zip).hexdigest())
+    monkeypatch.setitem(runtime_fetch.RUNTIME_ASSET_SHA256, cudart_asset, hashlib.sha256(cudart_zip).hexdigest())
+    installer = _zip_installer(tmp_path)
+    seen: list[str] = []
+
+    def opener(url: str, destination: Path) -> None:
+        seen.append(url)
+        destination.write_bytes(cudart_zip if "cudart" in url else llama_zip)
+
+    installer.opener = opener
+    binary = installer.ensure_llama("cuda", "win32")
+    assert binary.name == "llama-server.exe"
+    assert (binary.parent / "cudart64_12.dll").is_file()
+    assert any("cudart" in url for url in seen)
+    installer.opener = lambda _url, _destination: (_ for _ in ()).throw(AssertionError("再取得しない"))
+    assert installer.ensure_llama("cuda", "win32") == binary
 
 
 def test_runtime_reuse_rechecks_the_recorded_digest(tmp_path, monkeypatch):
