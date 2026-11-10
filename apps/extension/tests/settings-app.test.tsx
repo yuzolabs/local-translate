@@ -159,10 +159,9 @@ describe("settings app model operations", () => {
   });
 
   it("surfaces background errors from activate inside the model row", async () => {
-    mock.handlers.set("get-state", () =>
-      uiState({
-        models: [modelRow({ id: "plamo-3-translate-8b-GGUF", status: "missing", consented: true, active: false })],
-      }),
+    mock.handlers.set(
+      "get-state",
+      () => uiState({ models: [modelRow({ id: "plamo-3-translate-8b-GGUF", status: "ready", consented: true, active: false })] }),
     );
     mock.handlers.set("activate-model", () => ({ error: "モデルがダウンロードされていません" }));
     await renderSettingsApp();
@@ -183,5 +182,58 @@ describe("settings app model operations", () => {
     await waitFor(() => findButton("同意して記録する") !== undefined);
     (findButton("同意して記録する") as HTMLButtonElement).click();
     await waitFor(() => textOf(document.querySelector(".fault")) === "同意に失敗しました");
+  });
+});
+
+describe("settings app model list", () => {
+  it("groups models by kind with the active and suggested badges", async () => {
+    mock.handlers.set(
+      "get-state",
+      () =>
+        uiState({
+          models: [
+            modelRow({ id: "plamo-3-translate-8b-GGUF", display_name: "PLaMo 3 Translate 8B", active: true, status: "running" }),
+            modelRow({ id: "plamo-3-translate-0.8b-GGUF", display_name: "PLaMo 3 Translate 0.8B" }),
+            modelRow({ id: "Haas-ja-v1.0", kind: "asr", display_name: "Haas-ja v1.0", active: true }),
+            modelRow({ id: "silero-vad", kind: "vad", display_name: "Silero VAD" }),
+          ],
+          status: {
+            version: "0",
+            gpu: { backend: "cpu", name: "CPU", vram_total_mb: null, experimental_igpu: false, available_ram_mb: 8000 },
+            suggestion: { model_id: "plamo-3-translate-0.8b-GGUF", reason: "CPU のため", alternatives: [], context_size: 2048, n_gpu_layers: 0 },
+            llama: { state: "ready", model_id: "plamo-3-translate-8b-GGUF", port: 9 },
+            active_sessions: { subtitles: 0 },
+          },
+        }),
+    );
+    await renderSettingsApp();
+    const headings = [...document.querySelectorAll("h3")].map((node) => textOf(node));
+    expect(headings).toEqual(["翻訳", "音声認識", "発話区間検出"]);
+    const activeRow = document.querySelector(".model.active");
+    expect(activeRow).not.toBeNull();
+    expect(activeRow!.textContent).toContain("使用中");
+    expect(activeRow!.textContent).toContain("稼働中");
+    // 使用中の行（翻訳 8B と Haas）と発話区間検出には「使う」を出さない。0.8B だけが出す。
+    const useButtons = [...document.querySelectorAll("button")].filter((button) => textOf(button) === "使う");
+    expect(useButtons).toHaveLength(1);
+    const suggestedRow = [...document.querySelectorAll(".model")].find((row) =>
+      row.textContent!.includes("PLaMo 3 Translate 0.8B"),
+    );
+    expect(suggestedRow!.textContent).toContain("推奨");
+    // 発話区間検出には「使う」を出さない。
+    const vadRow = [...document.querySelectorAll(".model")].find((row) => row.textContent!.includes("Silero VAD"));
+    expect([...(vadRow?.querySelectorAll("button") ?? [])].map((button) => textOf(button))).not.toContain("使う");
+  });
+
+  it("disables the use button with a reason when the model is not downloaded", async () => {
+    mock.handlers.set(
+      "get-state",
+      () => uiState({ models: [modelRow({ id: "plamo-3-translate-8b-GGUF", status: "missing", consented: true })] }),
+    );
+    await renderSettingsApp();
+    const useButton = findButton("使う")!;
+    expect(useButton.disabled).toBe(true);
+    expect(useButton.title).toContain("未ダウンロード");
+    expect(document.body.textContent).toContain("未ダウンロード");
   });
 });

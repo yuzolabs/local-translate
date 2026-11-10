@@ -64,6 +64,9 @@ export interface ModelRow {
   quant?: string;
   active?: boolean;
   path?: string;
+  display_name?: string;
+  short_name?: string;
+  runtime?: string;
 }
 
 export interface DaemonStatus {

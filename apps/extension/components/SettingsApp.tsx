@@ -17,6 +17,13 @@ interface CommandView {
 
 const empty: UiState = { connected: false, events: [] };
 
+const MODEL_KIND_ORDER = ["translate", "asr", "vad"] as const;
+const MODEL_KIND_LABELS: Record<string, string> = {
+  translate: "翻訳",
+  asr: "音声認識",
+  vad: "発話区間検出",
+};
+
 export function SettingsApp() {
   const [state, setState] = useState<UiState>(empty);
   const [draft, setDraft] = useState("");
@@ -125,11 +132,26 @@ export function SettingsApp() {
 
       <section>
         <h2>モデル</h2>
-        <div class="models">
-          {(state.models ?? []).map((model) => (
-            <ModelLine key={model.id} model={model} onChange={() => void reload()} />
-          ))}
-        </div>
+        {MODEL_KIND_ORDER.map((kind) => {
+          const rows = (state.models ?? []).filter((model) => model.kind === kind);
+          if (!rows.length) return null;
+          return (
+            <div class="models" key={kind}>
+              <h3>{MODEL_KIND_LABELS[kind]}</h3>
+              {rows.map((model) => (
+                <ModelLine
+                  key={model.id}
+                  model={model}
+                  suggested={model.id === state.status?.suggestion.model_id}
+                  onChange={() => void reload()}
+                />
+              ))}
+            </div>
+          );
+        })}
+        {(state.models ?? []).filter((model) => !MODEL_KIND_ORDER.includes(model.kind as (typeof MODEL_KIND_ORDER)[number])).map((model) => (
+          <ModelLine key={model.id} model={model} suggested={false} onChange={() => void reload()} />
+        ))}
         {(state.events ?? []).slice(-3).map((event, index) => (
           <p class="note" key={`${event.at ?? index}-${event.type}`}>
             {event.type}
@@ -263,7 +285,7 @@ export function SettingsApp() {
   );
 }
 
-function ModelLine({ model, onChange }: { model: ModelRow; onChange: () => void }) {
+function ModelLine({ model, suggested, onChange }: { model: ModelRow; suggested: boolean; onChange: () => void }) {
   const [license, setLicense] = useState<LicenseView | null>(null);
   const [licenseError, setLicenseError] = useState("");
   const [actionError, setActionError] = useState("");
@@ -299,12 +321,35 @@ function ModelLine({ model, onChange }: { model: ModelRow; onChange: () => void 
   }
 
   const busyNote = busyAction === "activate-model" ? "切り替え中…" : busyAction === "download-model" ? "ダウンロードを開始しています…" : busyAction === "consent" ? "記録しています…" : "";
+  // 選択中は「使用中」、Runtime に読み込まれているモデルは「稼働中」。
+  const active = Boolean(model.active);
+  const running = model.status === "running";
+  const usable = model.status === "ready" || running;
+  const statusText = running
+    ? "稼働中"
+    : model.status === "ready"
+      ? "ダウンロード済み"
+      : model.status === "downloading"
+        ? `ダウンロード中 ${Math.round((model.progress ?? 0) * 100)}%`
+        : model.status === "error"
+          ? "ダウンロードに失敗しました"
+          : "未ダウンロード";
+  // 発話区間検出は選ぶ対象ではなく、字幕が内部で使う。
+  const selectable = model.kind !== "vad";
 
   return (
-    <div class="model">
+    <div class={active ? "model active" : "model"}>
       <div>
-        <strong>{model.id}</strong>
-        <div class="note">{model.note} / {model.status}{model.progress ? ` ${Math.round((model.progress ?? 0) * 100)}%` : ""}</div>
+        <div class="model-title">
+          <strong>{model.display_name ?? model.id}</strong>
+          {active && <span class="badge active">使用中</span>}
+          {suggested && !active && <span class="badge suggested">推奨</span>}
+        </div>
+        <div class="note">
+          {model.id}{model.quant && model.quant !== "custom" ? ` · ${model.quant}` : ""} · {statusText}
+          {model.size_gb ? ` · ${model.size_gb}GB` : ""}
+        </div>
+        {model.note && <div class="note">{model.note}</div>}
         {busyNote && <div class="note">{busyNote}</div>}
         {actionError && <div class="fault">{actionError}</div>}
         {license && (
@@ -322,10 +367,19 @@ function ModelLine({ model, onChange }: { model: ModelRow; onChange: () => void 
         {!model.consented && license && (
           <button type="button" disabled={Boolean(busyAction)} onClick={() => void run("consent")}>同意して記録する</button>
         )}
-        {model.consented && model.status !== "ready" && model.status !== "running" && (
+        {model.consented && !usable && (
           <button type="button" disabled={Boolean(busyAction)} onClick={() => void run("download-model")}>ダウンロード</button>
         )}
-        <button type="button" disabled={Boolean(busyAction)} onClick={() => void run("activate-model")}>使う</button>
+        {selectable && !active && (
+          <button
+            type="button"
+            disabled={Boolean(busyAction) || !usable}
+            title={usable ? undefined : "未ダウンロードです。ダウンロードしてから選べます。"}
+            onClick={() => void run("activate-model")}
+          >
+            使う
+          </button>
+        )}
       </div>
     </div>
   );
