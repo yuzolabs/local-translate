@@ -132,6 +132,41 @@ def test_boot_applies_the_stored_parallel_to_the_translator(tmp_path: Path):
     assert state.translator.parallel_slots == 3
 
 
+def test_cuda_setting_uses_cuda_for_llama_and_vulkan_for_speech():
+    from local_translate.backend_choice import resolve_llama_backend, speech_device_name, whisper_backend_name
+
+    gpu = GpuInfo("cuda", "RTX", 16376, 14000, False, 32000, True, True)
+    assert resolve_llama_backend("cuda", gpu) == "cuda"
+    assert resolve_llama_backend("auto", gpu) == "cuda"
+    assert speech_device_name("cuda", gpu, False) == "gpu"
+    assert speech_device_name("cpu", gpu, False) == "cpu"
+    assert whisper_backend_name("cuda", gpu) == "cuda"
+    no_vulkan = GpuInfo("cuda", "RTX", 16376, 14000, False, 32000, False, True)
+    assert speech_device_name("cuda", no_vulkan, False) == "cpu"
+
+
+@pytest.mark.asyncio
+async def test_install_runtime_requests_the_llama_cuda_build(tmp_path: Path):
+    paths = AppPaths.create(tmp_path / "state", tmp_path / "data")
+    state = AppState(paths)
+    state.gpu = GpuInfo("cuda", "RTX", 16376, 14000, False, 32000, True, True)
+    state.settings.update({"gpu_backend": "cuda"})
+    seen: dict[str, str] = {}
+
+    def ensure_llama(backend: str, platform: str | None = None) -> Path:
+        del platform
+        seen["llama"] = backend
+        return tmp_path / "llama-server"
+
+    state.installer.ensure_llama = ensure_llama
+    app = create_app(state)
+    async with TestClient(TestServer(app)) as client:
+        headers = {"Authorization": f"Bearer {state.token}"}
+        response = await client.post("/v1/runtimes/llama/install", headers=headers)
+        assert response.status == 200
+    assert seen["llama"] == "cuda"
+
+
 def test_vram_tiers():
     big = suggest_runtime(GpuInfo("cuda", "RTX", 24576, 20000, False, 32000, True, True))
     assert big.model_id == "plamo-3-translate-31b-GGUF-Q4_K_M"

@@ -12,6 +12,7 @@ from typing import AsyncIterator
 
 import aiohttp
 
+from local_translate.backend_choice import resolve_llama_backend
 from local_translate.constants import LLAMA_SERVER_ALIAS
 from local_translate.errors import CompanionError
 from local_translate.event_bus import EventBus
@@ -205,17 +206,7 @@ class LlamaServerManager:
             self._ensure_idle_task()
 
     def _resolve_backend(self, gpu_backend: str) -> str:
-        if gpu_backend == "auto":
-            if self.gpu.cuda_available:
-                return "cuda"
-            if self.gpu.vulkan_available and (not self.gpu.experimental_igpu or self.gpu.backend == "vulkan"):
-                return "vulkan" if self.gpu.vulkan_available else "cpu"
-            return "cpu"
-        if gpu_backend == "cuda" and not self.gpu.cuda_available:
-            raise CompanionError("cuda_unavailable", "CUDA が検出できません")
-        if gpu_backend == "vulkan" and not self.gpu.vulkan_available:
-            raise CompanionError("vulkan_unavailable", "Vulkan が検出できません")
-        return gpu_backend
+        return resolve_llama_backend(gpu_backend, self.gpu)
 
     async def _wait_until_ready(self) -> None:
         assert self.port is not None
