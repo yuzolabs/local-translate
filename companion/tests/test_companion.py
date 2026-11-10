@@ -4,6 +4,7 @@ import hashlib
 import json
 import sys
 import time
+import types
 from pathlib import Path
 
 import aiohttp
@@ -324,6 +325,89 @@ async def test_asr_activation_rejects_vad_and_undownloaded_models(tmp_path: Path
         assert selected.status == 200
         assert state.settings.data["active_asr_model"] == "qwen3-asr-0.6b"
         assert state.settings.data["asr_engine"] == "qwen3-asr"
+
+
+class FakeServeProcess:
+    """SpeechServeProcess の偽物。起動と停止だけを記録する。"""
+
+    def __init__(self, binary: str, models: list[str], device: str = "cpu", log_path=None) -> None:
+        self.binary = binary
+        self.models = list(models)
+        self.device = device
+        self.process = types.SimpleNamespace(returncode=None)
+        self.port: int | None = None
+        self.stopped = 0
+        self.started = 0
+
+    async def start(self, port: int) -> None:
+        self.started += 1
+        self.port = port
+
+    async def stop(self) -> None:
+        self.stopped += 1
+        self.process = None
+        self.port = None
+
+
+@pytest.mark.asyncio
+async def test_asr_selection_change_restarts_the_serve_on_the_next_start(tmp_path: Path, monkeypatch):
+    paths = AppPaths.create(tmp_path / "state", tmp_path / "data")
+    state = AppState(paths)
+    speech = state.speech
+    monkeypatch.setattr("local_translate.speech_runtime.SpeechServeProcess", FakeServeProcess)
+
+    async def fake_binary() -> str:
+        return "speech-binary"
+
+    speech.ensure_speech_binary = fake_binary
+    marker = tmp_path / "catalog-marker"
+    marker.write_text("haas-ja-v1.0", encoding="utf-8")
+    state.models.mark_file("Haas-ja-v1.0", marker)
+    state.models.mark_file("qwen3-asr-0.6b", tmp_path / "qwen-marker")
+
+    first = await speech.ensure_serve()
+    assert first.models == ["haas-ja-v1.0", "silero-vad"]
+    assert speech.restart_required is False
+
+    # 字幕セッションがないときに選択を変えたら古い serve を止める。
+    state.settings.update({"active_asr_model": "qwen3-asr-0.6b"})
+    await speech.sync_serve_selection(0)
+    assert speech.serve is None and speech.restart_required is False
+    assert first.stopped == 1
+
+    second = await speech.ensure_serve()
+    assert second.models == ["qwen3-asr-0.6b", "silero-vad"]
+    assert second is not first
+
+
+@pytest.mark.asyncio
+async def test_asr_selection_change_defers_restart_while_a_subtitle_session_runs(tmp_path: Path, monkeypatch):
+    paths = AppPaths.create(tmp_path / "state", tmp_path / "data")
+    state = AppState(paths)
+    speech = state.speech
+    monkeypatch.setattr("local_translate.speech_runtime.SpeechServeProcess", FakeServeProcess)
+
+    async def fake_binary() -> str:
+        return "speech-binary"
+
+    speech.ensure_speech_binary = fake_binary
+    marker = tmp_path / "catalog-marker"
+    marker.write_text("haas-ja-v1.0", encoding="utf-8")
+    state.models.mark_file("Haas-ja-v1.0", marker)
+    state.models.mark_file("Haas-ja-v1.0-F16", tmp_path / "f16-marker")
+
+    first = await speech.ensure_serve()
+    # 別の字幕セッションが動いている間は止めず、次の字幕開始時の切り替えを示す。
+    state.settings.update({"active_asr_model": "Haas-ja-v1.0-F16"})
+    await speech.sync_serve_selection(1)
+    assert speech.restart_required is True
+    assert speech.serve is first and first.stopped == 0
+
+    restarted = await speech.ensure_serve()
+    assert restarted is not first
+    assert restarted.models == ["haas-ja-v1.0:f16", "silero-vad"]
+    assert first.stopped == 1
+    assert speech.restart_required is False
 
 
 def test_site_rule_prefers_exact_host(tmp_path: Path):

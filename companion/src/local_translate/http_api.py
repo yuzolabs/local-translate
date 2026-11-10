@@ -268,6 +268,7 @@ async def activate_model(request: web.Request) -> web.Response:
         if state.models.resolve_model_path(model_id) is None:
             raise CompanionError("model_not_downloaded", "モデルがダウンロードされていません", 409)
         state.settings.update({"active_asr_model": model_id})
+        await state.speech.sync_serve_selection(state.subtitle_sessions)
         return web.json_response({"status": "selected", "model_id": model_id})
     await _ensure_translate_model(state, model_id)
     state.settings.update({"active_translate_model": model_id})
@@ -307,10 +308,14 @@ async def get_settings(request: web.Request) -> web.Response:
 
 async def post_settings(request: web.Request) -> web.Response:
     state = _state(request)
-    updated = state.settings.update(await _json(request))
+    body = await _json(request)
+    asr_touched = bool({"active_asr_model", "asr_engine", "whisper_model"} & set(body))
+    updated = state.settings.update(body)
     state.llama.idle_timeout_sec = int(updated["idle_timeout_sec"])
     parallel = updated.get("parallel") or suggest_runtime(state.gpu).parallel
     state.translator.set_parallel(int(parallel))
+    if asr_touched:
+        await state.speech.sync_serve_selection(state.subtitle_sessions)
     return web.json_response(updated)
 
 

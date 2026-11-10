@@ -37,6 +37,8 @@ class SpeechRuntime:
         self.gpu = gpu
         self.worker: SpeechWorkerClient | None = None
         self.serve: SpeechServeProcess | None = None
+        # 字幕セッション中に選択が変わったとき、次の字幕開始で載せ替える必要があるか。
+        self.restart_required = False
         self.log_path: Path | None = None
         self._lock = asyncio.Lock()
 
@@ -64,6 +66,38 @@ class SpeechRuntime:
         if preset and preset.kind == "asr" and preset.runtime == "speech.cpp" and preset.catalog_name:
             return preset.catalog_name
         raise CompanionError("asr_catalog_unavailable", "選択中の音声認識モデルは speech.cpp のカタログを持ちません", 409)
+
+    def serve_catalog(self) -> str | None:
+        """いま稼働中の serve のカタログ名。停止していれば None。"""
+        if self.serve and self.serve.process and self.serve.process.returncode is None and self.serve.port:
+            return self.serve.models[0] if self.serve.models else None
+        return None
+
+    def desired_serve_catalog(self) -> str | None:
+        """選択中の ASR が speech.cpp のとき次に上げるべきカタログ。whisper なら不要。"""
+        preset = self.active_asr_preset()
+        if preset and preset.kind == "asr" and preset.runtime == "speech.cpp":
+            return preset.catalog_name
+        return None
+
+    async def sync_serve_selection(self, active_subtitle_sessions: int) -> None:
+        """ASR の選択変更を serve へ反映する。
+
+        セッションがないときは古い serve を止めて次の開始で新カタログを起動する。
+        別の字幕セッションが動いている間は止めず、「次の字幕開始時に切り替え」を示す。
+        """
+        desired = self.desired_serve_catalog()
+        current = self.serve_catalog()
+        if current == desired:
+            self.restart_required = False
+            return
+        if active_subtitle_sessions > 0:
+            self.restart_required = True
+            return
+        if self.serve:
+            await self.serve.stop()
+            self.serve = None
+        self.restart_required = False
 
     async def ensure_speech_binary(self) -> str:
         binary = await asyncio.to_thread(self.installer.ensure_speech, self.runtime_backend())
@@ -99,6 +133,7 @@ class SpeechRuntime:
             if self.serve and self.serve.process and self.serve.process.returncode is None and self.serve.port:
                 if self.serve.models[:1] == [catalog]:
                     self.serve.last_used = time.monotonic()
+                    self.restart_required = False
                     return self.serve
                 # カタログが変わっていたら次の字幕開始時に起動し直す。
                 await self.serve.stop()
@@ -108,6 +143,7 @@ class SpeechRuntime:
             self.events.publish("asr.serve.starting", model=catalog, port=port)
             await self.serve.start(port)
             self.events.publish("asr.serve.ready", model=catalog, port=port)
+            self.restart_required = False
             return self.serve
 
     async def _whisper(self, pcm: bytes, sample_rate: int) -> str:
