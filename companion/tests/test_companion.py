@@ -222,6 +222,110 @@ def test_vram_tiers():
     assert "実験的" in igpu.reason
 
 
+def test_asr_settings_migrate_to_the_actually_used_model(tmp_path: Path):
+    # 移行は「これまで実際に使われていたモデル」を選択中にする。
+    def store_with(stored: dict) -> "SettingsStore":
+        path = tmp_path / f"settings-{len(stored)}-{stored.get('asr_engine')}-{stored.get('active_asr_model')}.json"
+        path.write_text(json.dumps(stored), encoding="utf-8")
+        return SettingsStore(path)
+
+    # engine whisper → whisper_model（whisper のプリセットでなければ whisper-base）
+    migrated = store_with({"asr_engine": "whisper", "whisper_model": "whisper-large-v3-turbo", "active_asr_model": "Haas-ja-v1.0"})
+    assert migrated.data["active_asr_model"] == "whisper-large-v3-turbo"
+    assert migrated.data["asr_engine"] == "whisper"
+    assert migrated.data["whisper_model"] == "whisper-large-v3-turbo"
+    assert json.loads(migrated.path.read_text(encoding="utf-8"))["active_asr_model"] == "whisper-large-v3-turbo"
+    fallback = store_with({"asr_engine": "whisper", "whisper_model": "silero-vad", "active_asr_model": "Haas-ja-v1.0"})
+    assert fallback.data["active_asr_model"] == "whisper-base"
+    # engine qwen3-asr → qwen3-asr-0.6b（一覧上の選択が Haas のままでも実態は qwen3）
+    qwen = store_with({"asr_engine": "qwen3-asr", "active_asr_model": "Haas-ja-v1.0"})
+    assert qwen.data["active_asr_model"] == "qwen3-asr-0.6b"
+    # engine haas: active が speech.cpp の音声認識プリセットならそのまま
+    keep = store_with({"asr_engine": "haas", "active_asr_model": "Haas-ja-v1.0-F16"})
+    assert keep.data["active_asr_model"] == "Haas-ja-v1.0-F16"
+    # それ以外（silero-vad、whisper-*、不明な ID）→ Haas-ja-v1.0
+    for bad in ("silero-vad", "whisper-base", "unknown-model"):
+        reset = store_with({"asr_engine": "haas", "active_asr_model": bad})
+        assert reset.data["active_asr_model"] == "Haas-ja-v1.0"
+
+
+def test_legacy_asr_posts_translate_to_active_asr_model(tmp_path: Path):
+    store = SettingsStore(tmp_path / "settings.json")
+    # 旧 UI の「エンジンで whisper」＋「whisper モデル選択」
+    store.update({"asr_engine": "whisper", "whisper_model": "whisper-large-v3-turbo"})
+    assert store.data["active_asr_model"] == "whisper-large-v3-turbo"
+    # engine qwen3-asr
+    store.update({"asr_engine": "qwen3-asr"})
+    assert store.data["active_asr_model"] == "qwen3-asr-0.6b"
+    # engine haas への戻し: speech.cpp の ASR プリセットはそのまま使われる
+    store.update({"asr_engine": "haas"})
+    assert store.data["active_asr_model"] == "qwen3-asr-0.6b"
+    # 新しいPOST: モデルを直接選ぶ
+    store.update({"active_asr_model": "Haas-ja-v1.0-F16"})
+    assert store.data["asr_engine"] == "haas"
+    # 発話区間検出は拒否
+    with pytest.raises(Exception) as excinfo:
+        store.update({"active_asr_model": "silero-vad"})
+    assert excinfo.value.code == "invalid_asr_model"
+    with pytest.raises(Exception) as excinfo:
+        store.update({"asr_engine": "bogus"})
+    assert excinfo.value.code == "invalid_asr_engine"
+
+
+def test_active_catalog_name_follows_the_unified_asr_selection(tmp_path: Path):
+    paths = AppPaths.create(tmp_path / "state", tmp_path / "data")
+    state = AppState(paths)
+    state.settings.update({"active_asr_model": "Haas-ja-v1.0-F16"})
+    assert state.speech.active_catalog_name() == "haas-ja-v1.0:f16"
+    state.settings.update({"active_asr_model": "qwen3-asr-0.6b"})
+    assert state.speech.active_catalog_name() == "qwen3-asr-0.6b"
+    state.settings.update({"active_asr_model": "whisper-large-v3-turbo"})
+    with pytest.raises(Exception) as excinfo:
+        state.speech.active_catalog_name()
+    assert excinfo.value.code == "asr_catalog_unavailable"
+
+
+@pytest.mark.asyncio
+async def test_transcribe_dispatches_on_the_active_asr_runtime(tmp_path: Path, monkeypatch):
+    from local_translate.speech_runtime import SpeechRuntime
+
+    paths = AppPaths.create(tmp_path / "state", tmp_path / "data")
+    state = AppState(paths)
+    state.settings.update({"active_asr_model": "whisper-large-v3-turbo"})
+    seen: dict[str, str] = {}
+
+    async def fake_whisper(self, pcm: bytes, sample_rate: int) -> str:
+        del pcm, sample_rate
+        seen["model"] = self.settings.data["active_asr_model"]
+        return "音声認識結果"
+
+    monkeypatch.setattr(SpeechRuntime, "_whisper", fake_whisper)
+    assert await state.speech.transcribe_pcm(b"\x00\x00" * 16) == "音声認識結果"
+    assert seen["model"] == "whisper-large-v3-turbo"
+
+
+@pytest.mark.asyncio
+async def test_asr_activation_rejects_vad_and_undownloaded_models(tmp_path: Path):
+    paths = AppPaths.create(tmp_path / "state", tmp_path / "data")
+    state = AppState(paths)
+    app = create_app(state)
+    async with TestClient(TestServer(app)) as client:
+        headers = {"Authorization": f"Bearer {state.token}"}
+        vad = await client.post("/v1/models/silero-vad/activate", headers=headers)
+        assert vad.status == 400
+        assert (await vad.json())["error"]["code"] == "invalid_asr_model"
+        missing = await client.post("/v1/models/qwen3-asr-0.6b/activate", headers=headers)
+        assert missing.status == 409
+        assert (await missing.json())["error"]["code"] == "model_not_downloaded"
+        marker = tmp_path / "catalog-marker"
+        marker.write_text("qwen3-asr-0.6b", encoding="utf-8")
+        state.models.mark_file("qwen3-asr-0.6b", marker)
+        selected = await client.post("/v1/models/qwen3-asr-0.6b/activate", headers=headers)
+        assert selected.status == 200
+        assert state.settings.data["active_asr_model"] == "qwen3-asr-0.6b"
+        assert state.settings.data["asr_engine"] == "qwen3-asr"
+
+
 def test_site_rule_prefers_exact_host(tmp_path: Path):
     store = SettingsStore(tmp_path / "settings.json")
     store.update(

@@ -10,6 +10,7 @@ from local_translate.constants import DEFAULT_FORM, DEFAULT_IDLE_TIMEOUT_SEC, DE
 from local_translate.errors import CompanionError
 from local_translate.json_store import read_text_allowing_replace, replace_file_despite_open_readers
 from local_translate.languages import LANGUAGE_CODES
+from local_translate.presets import ModelPreset, get_preset
 
 SETTING_KEYS = {
     "target_lang",
@@ -31,6 +32,52 @@ SETTING_KEYS = {
     "experimental_igpu",
     "whisper_model",
 }
+
+
+# ASR の選択は active_asr_model 1 つ。asr_engine と whisper_model は互換のため残し、
+# 保存済み値と旧拡張からの POST は実際に使われていたモデルへ読み替える。
+SPEECH_CPP_ASR_FALLBACK = "Haas-ja-v1.0"
+QWEN3_ASR_MODEL = "qwen3-asr-0.6b"
+WHISPER_ASR_FALLBACK = "whisper-base"
+
+
+def is_speech_cpp_asr_preset(model_id: str) -> bool:
+    preset = get_preset(model_id)
+    return bool(preset and preset.kind == "asr" and preset.runtime == "speech.cpp")
+
+
+def is_whisper_asr_preset(model_id: str) -> bool:
+    preset = get_preset(model_id)
+    return bool(preset and preset.kind == "asr" and preset.runtime == "whisper.cpp")
+
+
+def derive_asr_engine(model_id: str) -> str:
+    """選択中の ASR モデルから旧設定 asr_engine の値を導出する。"""
+    preset = get_preset(model_id)
+    if preset and preset.kind == "asr" and preset.runtime == "whisper.cpp":
+        return "whisper"
+    if preset and preset.model_id == QWEN3_ASR_MODEL:
+        return "qwen3-asr"
+    return "haas"
+
+
+def resolve_legacy_asr_model(engine: str, active_asr_model: str, whisper_model: str) -> str:
+    """移行前の 3 つの設定が実際に使っていたモデルを 1 つに決める。
+
+    - engine whisper → whisper_model（whisper のプリセットでなければ whisper-base）
+    - engine qwen3-asr → qwen3-asr-0.6b
+    - engine haas → active_asr_model が speech.cpp の音声認識プリセットならそのまま、
+      それ以外（silero-vad、whisper-*、不明な ID）→ Haas-ja-v1.0
+    """
+    if engine == "whisper":
+        if is_whisper_asr_preset(whisper_model):
+            return whisper_model
+        return WHISPER_ASR_FALLBACK
+    if engine == "qwen3-asr":
+        return QWEN3_ASR_MODEL
+    if is_speech_cpp_asr_preset(active_asr_model):
+        return active_asr_model
+    return SPEECH_CPP_ASR_FALLBACK
 
 
 def default_settings() -> dict[str, Any]:
@@ -66,14 +113,35 @@ class SettingsStore:
     def __init__(self, path: Path) -> None:
         self.path = path
         self.data = default_settings()
+        # 設定ファイルに保存されていたキー。新規導入時の既定モデル判定に使う。
+        self.stored_keys: set[str] = set()
         self.load()
 
     def load(self) -> None:
         if not self.path.exists():
+            self._normalize_asr_selection()
             return
         stored = json.loads(read_text_allowing_replace(self.path))
         if isinstance(stored, dict):
-            self.data.update({key: value for key, value in stored.items() if key in SETTING_KEYS})
+            filtered = {key: value for key, value in stored.items() if key in SETTING_KEYS}
+            self.stored_keys = set(filtered)
+            self.data.update(filtered)
+        self._normalize_asr_selection()
+
+    def _normalize_asr_selection(self) -> None:
+        """保存済み設定を active_asr_model 中心の形へ移行し、揃っていれば保存しなおす。"""
+        data = self.data
+        resolved = resolve_legacy_asr_model(str(data["asr_engine"]), str(data["active_asr_model"]), str(data["whisper_model"]))
+        changed = resolved != data["active_asr_model"]
+        data["active_asr_model"] = resolved
+        engine = derive_asr_engine(resolved)
+        changed = changed or engine != data["asr_engine"]
+        data["asr_engine"] = engine
+        if is_whisper_asr_preset(resolved):
+            changed = changed or data["whisper_model"] != resolved
+            data["whisper_model"] = resolved
+        if changed:
+            self.save()
 
     def save(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -88,12 +156,34 @@ class SettingsStore:
         unknown = sorted(set(patch) - SETTING_KEYS)
         if unknown:
             raise CompanionError("unknown_setting", f"未知の設定です: {', '.join(unknown)}")
+        patch = _translate_legacy_asr_patch(dict(patch), self.data)
         merged = self.snapshot()
         merged.update(patch)
+        _sync_derived_asr_fields(merged)
         validate_settings(merged)
         self.data = merged
         self.save()
         return self.snapshot()
+
+
+def _translate_legacy_asr_patch(patch: dict[str, Any], current: dict[str, Any]) -> dict[str, Any]:
+    """旧拡張が POST する asr_engine / whisper_model を active_asr_model へ読み替える。"""
+    if "active_asr_model" in patch or not ({"asr_engine", "whisper_model"} & set(patch)):
+        return patch
+    engine = str(patch.pop("asr_engine", current["asr_engine"]))
+    if engine not in {"haas", "whisper", "qwen3-asr"}:
+        raise CompanionError("invalid_asr_engine", "音声認識エンジンは haas / whisper / qwen3-asr です")
+    whisper_model = str(patch.pop("whisper_model", current["whisper_model"]))
+    patch["active_asr_model"] = resolve_legacy_asr_model(engine, str(current["active_asr_model"]), whisper_model)
+    return patch
+
+
+def _sync_derived_asr_fields(merged: dict[str, Any]) -> None:
+    """active_asr_model から asr_engine（と whisper 同期の whisper_model）を導出する。"""
+    resolved = str(merged["active_asr_model"])
+    merged["asr_engine"] = derive_asr_engine(resolved)
+    if is_whisper_asr_preset(resolved):
+        merged["whisper_model"] = resolved
 
 
 def validate_settings(data: dict[str, Any]) -> None:
@@ -111,6 +201,10 @@ def validate_settings(data: dict[str, Any]) -> None:
         raise CompanionError("invalid_backend", "GPU バックエンドは auto / cuda / vulkan / cpu です")
     if data["asr_engine"] not in {"haas", "whisper", "qwen3-asr"}:
         raise CompanionError("invalid_asr_engine", "音声認識エンジンは haas / whisper / qwen3-asr です")
+    # 発話区間検出や翻訳モデル、不明な ID は ASR の選択として拒否する。
+    asr_preset = get_preset(data["active_asr_model"])
+    if not isinstance(asr_preset, ModelPreset) or asr_preset.kind != "asr":
+        raise CompanionError("invalid_asr_model", f"音声認識モデルとして選べません: {data['active_asr_model']}")
     if data["subtitle_backend"] not in {"speech-serve", "segment-worker"}:
         raise CompanionError("invalid_subtitle_backend", "字幕バックエンドが不正です")
     for key in ("n_gpu_layers", "context_size", "parallel", "idle_timeout_sec"):

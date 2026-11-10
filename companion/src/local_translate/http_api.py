@@ -260,8 +260,14 @@ async def activate_model(request: web.Request) -> web.Response:
     state = _state(request)
     model_id = request.match_info["model_id"]
     preset = get_preset(model_id)
-    if preset and preset.kind != "translate" and state.models.custom_by_id(model_id) is None:
-        state.settings.update({"active_asr_model": model_id, "asr_engine": "haas" if model_id.startswith("Haas") else state.settings.data["asr_engine"]})
+    if preset and preset.kind != "translate":
+        # 種類が音声認識でないモデル（発話区間検出）は ASR として選べない。
+        if preset.kind != "asr":
+            raise CompanionError("invalid_asr_model", "発話区間検出は音声認識モデルとして選べません")
+        # 未ダウンロードなら翻訳と同じく 409 で拒否する。
+        if state.models.resolve_model_path(model_id) is None:
+            raise CompanionError("model_not_downloaded", "モデルがダウンロードされていません", 409)
+        state.settings.update({"active_asr_model": model_id})
         return web.json_response({"status": "selected", "model_id": model_id})
     await _ensure_translate_model(state, model_id)
     state.settings.update({"active_translate_model": model_id})
