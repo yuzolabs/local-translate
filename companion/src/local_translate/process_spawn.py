@@ -5,6 +5,10 @@ the call succeeds, but the process still dies with the job. A native-messaging h
 is in such a job. Reparenting the daemon to explorer.exe puts it outside that job.
 If explorer cannot be opened, Win32_Process.Create is the fallback, because the WMI
 service is also outside the host's job.
+
+Do not pass DETACHED_PROCESS. The venv python.exe is a launcher, and that flag gives
+the real interpreter a new visible console. CREATE_NO_WINDOW hides the launcher and
+the console programs it starts, such as nvidia-smi.
 """
 
 from __future__ import annotations
@@ -16,7 +20,6 @@ import subprocess
 from pathlib import Path
 
 CREATE_NEW_PROCESS_GROUP = 0x00000200
-DETACHED_PROCESS = 0x00000008
 CREATE_NO_WINDOW = 0x08000000
 EXTENDED_STARTUPINFO_PRESENT = 0x00080000
 PROCESS_CREATE_PROCESS = 0x0080
@@ -236,7 +239,7 @@ def _create_process_with_parent(kernel32, argv: list[str], cwd: Path, parent: in
     startup.lpAttributeList = ctypes.addressof(attributes)
     process_info = ProcessInformation()
     command = subprocess.list2cmdline(argv)
-    flags = EXTENDED_STARTUPINFO_PRESENT | CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS
+    flags = EXTENDED_STARTUPINFO_PRESENT | CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP
     created = kernel32.CreateProcessW(
         None,
         command,
@@ -261,7 +264,7 @@ def _create_process_with_parent(kernel32, argv: list[str], cwd: Path, parent: in
 def _spawn_via_wmi(argv: list[str], cwd: Path) -> int:
     command = subprocess.list2cmdline(argv).replace("'", "''")
     directory = str(cwd).replace("'", "''")
-    flags = CREATE_NO_WINDOW | DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+    flags = CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP
     script = (
         "$startup = New-Object System.Management.ManagementClass('Win32_ProcessStartup'); "
         "$info = $startup.CreateInstance(); "

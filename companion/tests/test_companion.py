@@ -926,6 +926,51 @@ def test_daemon_log_keeps_japanese_as_utf8(tmp_path: Path):
         root.handlers = previous_handlers
 
 
+def test_windows_detached_daemon_has_no_console_window(tmp_path: Path):
+    if sys.platform != "win32":
+        pytest.skip("Windows のコンソール窓の確認です")
+    import time
+
+    from local_translate.process_spawn import spawn_detached_daemon
+
+    probe = tmp_path / "console_probe.py"
+    child_probe = tmp_path / "child_probe.py"
+    result_path = tmp_path / "console.json"
+    child_probe.write_text(
+        "import ctypes\n"
+        "kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)\n"
+        "user32 = ctypes.WinDLL('user32', use_last_error=True)\n"
+        "kernel32.GetConsoleWindow.restype = ctypes.c_void_p\n"
+        "handle = kernel32.GetConsoleWindow() or 0\n"
+        "print(handle, bool(handle and user32.IsWindowVisible(ctypes.c_void_p(handle))))\n",
+        encoding="utf-8",
+    )
+    probe.write_text(
+        "import ctypes, json, subprocess, sys\n"
+        "from pathlib import Path\n"
+        "kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)\n"
+        "user32 = ctypes.WinDLL('user32', use_last_error=True)\n"
+        "kernel32.GetConsoleWindow.restype = ctypes.c_void_p\n"
+        f"grandchild = subprocess.run([sys.executable, r'{child_probe}'], capture_output=True, text=True)\n"
+        "own = kernel32.GetConsoleWindow() or 0\n"
+        f"Path(r'{result_path}').write_text(json.dumps({{\n"
+        "    'own_hwnd': own,\n"
+        "    'own_visible': bool(own and user32.IsWindowVisible(ctypes.c_void_p(own))),\n"
+        "    'child': grandchild.stdout.strip(),\n"
+        "}), encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+    spawn_detached_daemon([sys.executable, str(probe)], tmp_path)
+    deadline = time.monotonic() + 20
+    while time.monotonic() < deadline and not result_path.exists():
+        time.sleep(0.1)
+    assert result_path.exists(), "コンソール確認のプローブが結果を書きませんでした"
+    payload = json.loads(result_path.read_text(encoding="utf-8"))
+    assert payload["own_hwnd"] == 0
+    assert payload["own_visible"] is False
+    assert payload["child"].startswith("0 ")
+
+
 def test_windows_child_job_kills_the_process_when_closed():
     if sys.platform != "win32":
         pytest.skip("Windows の Job Object です")
