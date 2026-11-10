@@ -87,6 +87,11 @@ def extract_archive(archive: Path, destination: Path) -> None:
         package.extractall(destination, filter="data")
 
 
+def _runtime_digest_key(destination: Path, runtimes_dir: Path) -> str:
+    """Digest record key with forward slashes, so Windows and Linux share one spelling."""
+    return destination.relative_to(runtimes_dir).as_posix()
+
+
 def find_executable(root: Path, name: str) -> Path | None:
     candidates = [name, f"{name}.exe"]
     for candidate in candidates:
@@ -113,7 +118,7 @@ class RuntimeInstaller:
     def ensure_llama(self, backend: str, platform: str | None = None) -> Path:
         platform = platform or os.sys.platform
         destination = self.runtimes_dir / "llama.cpp" / LLAMA_CPP_VERSION / backend
-        key = str(destination.relative_to(self.runtimes_dir))
+        key = _runtime_digest_key(destination, self.runtimes_dir)
         binary = self._verified_binary(key, destination, "llama-server")
         if binary:
             return binary
@@ -124,7 +129,7 @@ class RuntimeInstaller:
     def ensure_speech(self, backend: str, platform: str | None = None) -> Path:
         platform = platform or os.sys.platform
         destination = self.runtimes_dir / "speech.cpp" / SPEECH_CPP_VERSION / backend
-        key = str(destination.relative_to(self.runtimes_dir))
+        key = _runtime_digest_key(destination, self.runtimes_dir)
         binary = self._verified_binary(key, destination, "speech")
         if binary:
             return binary
@@ -135,7 +140,7 @@ class RuntimeInstaller:
     def ensure_whisper(self, platform: str | None = None) -> Path:
         platform = platform or os.sys.platform
         root = self.runtimes_dir / "whisper.cpp" / WHISPER_CPP_VERSION
-        key = str(root.relative_to(self.runtimes_dir))
+        key = _runtime_digest_key(root, self.runtimes_dir)
         binary = self._verified_binary(key, root, "whisper-cli", alt_name="main")
         if binary:
             return binary
