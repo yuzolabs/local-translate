@@ -21,6 +21,15 @@ from local_translate.runtime_fetch import RuntimeInstaller
 from local_translate.settings_store import SettingsStore
 
 
+def effective_subtitle_backend(settings_data: dict) -> str:
+    """ASR が whisper.cpp のとき、字幕は subtitle_backend 設定によらず
+    segment-worker 経路で動かす（speech serve は whisper を扱えないため）。"""
+    preset = get_preset(settings_data["active_asr_model"])
+    if preset and preset.kind == "asr" and preset.runtime == "whisper.cpp":
+        return "segment-worker"
+    return str(settings_data["subtitle_backend"])
+
+
 class SpeechRuntime:
     def __init__(
         self,

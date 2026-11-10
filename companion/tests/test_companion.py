@@ -410,6 +410,65 @@ async def test_asr_selection_change_defers_restart_while_a_subtitle_session_runs
     assert speech.restart_required is False
 
 
+def test_effective_subtitle_backend_forces_segment_worker_for_whisper(tmp_path: Path):
+    from local_translate.speech_runtime import effective_subtitle_backend
+
+    paths = AppPaths.create(tmp_path / "state", tmp_path / "data")
+    state = AppState(paths)
+    data = state.settings.data
+    data["subtitle_backend"] = "speech-serve"
+    data["active_asr_model"] = "Haas-ja-v1.0"
+    assert effective_subtitle_backend(data) == "speech-serve"
+    data["active_asr_model"] = "whisper-large-v3-turbo"
+    assert effective_subtitle_backend(data) == "segment-worker"
+    data["subtitle_backend"] = "segment-worker"
+    data["active_asr_model"] = "qwen3-asr-0.6b"
+    assert effective_subtitle_backend(data) == "segment-worker"
+
+
+@pytest.mark.asyncio
+async def test_whisper_subtitles_run_through_the_segment_worker_path(tmp_path: Path):
+    paths = AppPaths.create(tmp_path / "state", tmp_path / "data")
+    state = AppState(paths)
+    state.llama = FakeLlama()
+    state.translator.llama = state.llama
+    model = tmp_path / "model.gguf"
+    model.write_bytes(b"gguf")
+    state.models.mark_file("plamo-3-translate-0.8b-GGUF", model)
+    # subtitle_backend が speech-serve 既定でも、whisper 選択なら segment-worker 経路になる。
+    assert state.settings.data["subtitle_backend"] == "speech-serve"
+    marker = tmp_path / "whisper-marker"
+    marker.write_bytes(b"ggml")
+    state.models.mark_file("whisper-large-v3-turbo", marker)
+    state.settings.update({"active_asr_model": "whisper-large-v3-turbo", "translate_interim": False})
+    seen: dict[str, str] = {}
+
+    async def transcribe_pcm(pcm: bytes, sample_rate: int = 16000) -> str:
+        del pcm, sample_rate
+        seen["model"] = state.settings.data["active_asr_model"]
+        return "会議です"
+
+    state.speech.transcribe_pcm = transcribe_pcm
+    app = create_app(state)
+    async with TestClient(TestServer(app)) as client:
+        async with client.ws_connect("/api/subtitles") as socket:
+            await socket.send_json({"type": "auth", "token": state.token})
+            await socket.send_bytes(pcm_tone(16000, 2000))
+            await socket.send_bytes(pcm_tone(16000, 0))
+            await socket.send_json({"type": "stop"})
+            captions = []
+            while True:
+                message = await socket.receive(timeout=5)
+                if message.type is not aiohttp.WSMsgType.TEXT:
+                    break
+                captions.append(message.json())
+                if captions[-1].get("final"):
+                    break
+    finals = [caption for caption in captions if caption.get("final")]
+    assert finals and finals[-1]["text"] == "会議です"
+    assert seen["model"] == "whisper-large-v3-turbo"
+
+
 def test_site_rule_prefers_exact_host(tmp_path: Path):
     store = SettingsStore(tmp_path / "settings.json")
     store.update(

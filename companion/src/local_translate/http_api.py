@@ -14,6 +14,7 @@ from aiohttp import WSMsgType, web
 from local_translate.asr.segment_manager import SegmentManager
 from local_translate.backend_choice import resolve_llama_backend
 from local_translate.asr.speech_serve import RealtimeSubtitleBridge
+from local_translate.speech_runtime import effective_subtitle_backend
 from local_translate.constants import (
     APP_VERSION,
     BUILT_WITH_PLAMO,
@@ -380,7 +381,7 @@ async def subtitles(request: web.Request) -> web.WebSocketResponse:
         return socket
     state.subtitle_sessions += 1
     pcm_queue: asyncio.Queue[bytes | None] = asyncio.Queue()
-    backend = state.settings.data["subtitle_backend"]
+    backend = effective_subtitle_backend(state.settings.data)
     runner: asyncio.Task | None = None
     try:
         if backend == "speech-serve":
