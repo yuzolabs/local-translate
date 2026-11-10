@@ -753,6 +753,9 @@ async def test_http_translate_requires_token_and_streams(tmp_path: Path):
         assert response.status == 200
         payload = await response.json()
         assert payload["text"] == "訳文"
+        assert payload["model_id"] == "plamo-3-translate-0.8b-GGUF"
+        assert payload["model_label"] == "PLaMo 3 Translate 0.8B"
+        assert payload["model_short"] == "0.8B"
         assert "<|plamo:tag|>dataset" in state.llama.prompts[0]
         models = await client.get("/v1/models", headers=headers)
         ids = [item["id"] for item in (await models.json())["models"]]
@@ -769,6 +772,8 @@ async def test_http_translate_requires_token_and_streams(tmp_path: Path):
         streamed = await client.post("/api/translate", headers=headers, json={"text": "Hello", "target_lang": "ja"})
         raw = await streamed.text()
         assert "event: delta" in raw and "訳文" in raw
+        done_line = [line for line in raw.splitlines() if line.startswith("data:") and "model_label" in line]
+        assert done_line and "PLaMo 3 Translate 0.8B" in done_line[0]
 
 
 @pytest.mark.asyncio

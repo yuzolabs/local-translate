@@ -15,7 +15,8 @@ from local_translate.speech_runtime import effective_subtitle_backend
 from local_translate.vram_presets import resolve_launch_numbers, suggest_runtime
 
 
-def _model_identity(model_id: str, registry: ModelRegistry) -> dict[str, Any]:
+def model_identity(model_id: str, registry: ModelRegistry) -> dict[str, Any]:
+    """モデル ID から表示名・短い名前・量子化を返す。拡張は ID を加工しない。"""
     preset = get_preset(model_id)
     if preset:
         return {
@@ -38,7 +39,7 @@ def build_translate_current(state) -> dict[str, Any]:
     settings = state.settings.data
     selected_id = str(settings["active_translate_model"])
     current: dict[str, Any] = {
-        "selected": _model_identity(selected_id, state.models),
+        "selected": model_identity(selected_id, state.models),
         "loaded": {"id": state.llama.model_id} if state.llama.model_id else None,
         "state": state.llama.state,
         "backend": None,
@@ -102,7 +103,7 @@ def build_asr_current(state) -> dict[str, Any]:
     else:
         device = speech.device_name()
     return {
-        "selected": _model_identity(selected_id, state.models),
+        "selected": model_identity(selected_id, state.models),
         "runtime": runtime,
         "subtitle_pipeline": effective_subtitle_backend(settings),
         "loaded": {"id": loaded_id} if loaded_id else None,

@@ -25,7 +25,7 @@ from local_translate.constants import (
     WINDOWS_HAAS_DECISION,
     WINDOWS_HAAS_DECISION_REASON,
 )
-from local_translate.current_models import build_current
+from local_translate.current_models import build_current, model_identity
 from local_translate.errors import CompanionError
 from local_translate.languages import LANGUAGES
 from local_translate.license_texts import LICENSES
@@ -341,12 +341,20 @@ async def translate(request: web.Request) -> web.Response:
     state = _state(request)
     translate_request = validate_translate_request(await _json(request))
     model_id = translate_request.model_id or state.settings.data["active_translate_model"]
+    identity = model_identity(model_id, state.models)
     await _ensure_translate_model(state, model_id)
     if not translate_request.stream:
         parts = []
         async for delta in state.translator.stream(translate_request):
             parts.append(delta)
-        return web.json_response({"text": "".join(parts), "model_id": model_id})
+        return web.json_response(
+            {
+                "text": "".join(parts),
+                "model_id": model_id,
+                "model_label": identity["label"],
+                "model_short": identity["short_label"],
+            }
+        )
     response = web.StreamResponse(
         status=200,
         headers={"Content-Type": "text/event-stream", "Cache-Control": "no-cache"},
@@ -355,7 +363,15 @@ async def translate(request: web.Request) -> web.Response:
     try:
         async for delta in state.translator.stream(translate_request):
             await _sse(response, "delta", {"text": delta})
-        await _sse(response, "done", {"model_id": model_id})
+        await _sse(
+            response,
+            "done",
+            {
+                "model_id": model_id,
+                "model_label": identity["label"],
+                "model_short": identity["short_label"],
+            },
+        )
     except CompanionError as exc:
         await _sse(response, "error", {"code": exc.code, "message": exc.message})
     await response.write_eof()
