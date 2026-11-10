@@ -1,0 +1,35 @@
+{
+  "measured_at": "2026-11-10",
+  "device": "NVIDIA GeForce RTX 4070 Ti SUPER, 16376 MiB, driver 610.88, Windows 11",
+  "backend": "cuda",
+  "decision": "16GB の段の代替は 31B Q3_K_M のままにする。遅すぎず、同じ3文では 8B と同じ訳になった。ただし空き VRAM は 109 MiB しかなく、字幕と同時には使えない。",
+  "models": [
+    {
+      "model_id": "plamo-3-translate-31b-GGUF-Q3_K_M",
+      "quant": "Q3_K_M",
+      "context_size": 2048,
+      "load_seconds": 9.062,
+      "vram_used_mib": 15953,
+      "vram_free_mib": 109,
+      "generation_after_ready": [
+        {"source": "Hello.", "translation": "こんにちは。", "seconds": 0.278},
+        {"source": "The meeting has been rescheduled to next Monday.", "translation": "会議は来週の月曜日に延期されました。", "seconds": 0.893},
+        {"source": "Please save your changes.", "translation": "変更内容を保存してください。", "seconds": 0.586}
+      ]
+    },
+    {
+      "model_id": "plamo-3-translate-31b-GGUF-Q2_K",
+      "quant": "Q2_K",
+      "context_size": 4096,
+      "load_seconds": 8.012,
+      "vram_used_mib": 13892,
+      "vram_free_mib": 2170,
+      "generation_after_ready": [
+        {"source": "Hello.", "translation": "こんにちは。", "seconds": 0.138},
+        {"source": "The meeting has been rescheduled to next Monday.", "translation": "会議は来週の月曜日に変更されました。", "seconds": 0.26},
+        {"source": "Please save your changes.", "translation": "変更内容を保存してください。", "seconds": 0.193}
+      ],
+      "note": "2文目が 延期 ではなく 変更 になった。速度と空き VRAM は Q3_K_M より余裕がある。"
+    }
+  ]
+}
