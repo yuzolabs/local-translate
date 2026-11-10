@@ -37,6 +37,8 @@ export default defineBackground(() => {
     registerMenus();
   });
   registerMenus();
+  // 設定画面を開く前から、ツールバーに使用中の翻訳モデルを出す。
+  void refreshUiState();
   chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => undefined);
   chrome.contextMenus.onClicked.addListener((info, tab) => {
     if (!tab?.id) return;
