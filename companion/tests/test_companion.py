@@ -141,6 +141,11 @@ def test_cuda_setting_uses_cuda_for_llama_and_vulkan_for_speech():
     assert speech_device_name("cuda", gpu, False) == "gpu"
     assert speech_device_name("cpu", gpu, False) == "cpu"
     assert whisper_backend_name("cuda", gpu) == "cuda"
+    assert whisper_backend_name("auto", gpu) == "cuda"
+    assert whisper_backend_name("vulkan", gpu) == "cpu"
+    missing = GpuInfo("cpu", "none", None, None, False, 8000, False, False)
+    assert whisper_backend_name("cuda", missing) == "cpu"
+    assert whisper_backend_name("not-a-backend", missing) == "cpu"
     no_vulkan = GpuInfo("cuda", "RTX", 16376, 14000, False, 32000, False, True)
     assert speech_device_name("cuda", no_vulkan, False) == "cpu"
 

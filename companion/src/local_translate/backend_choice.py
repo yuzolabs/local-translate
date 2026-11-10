@@ -41,5 +41,7 @@ def speech_device_name(requested: str, gpu: GpuInfo, experimental_igpu: bool) ->
 
 
 def whisper_backend_name(requested: str, gpu: GpuInfo) -> str:
-    """whisper.cpp backend. Only CUDA has a separate Windows build; Vulkan stays on CPU."""
-    return "cuda" if resolve_llama_backend(requested, gpu) == "cuda" else "cpu"
+    """whisper.cpp backend. CUDA only when that GPU is present; otherwise stay on CPU."""
+    if requested in {"auto", "cuda"} and gpu.cuda_available:
+        return "cuda"
+    return "cpu"
