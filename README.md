@@ -20,9 +20,15 @@
 
 拡張は daemon の `WS /api/events` を購読し、モデル DL 進捗・`llama-server` の起動/停止・エラーを設定 UI へ反映します。進捗イベントは約 1 秒間隔で表示を更新します。
 
+daemon は「どのモデルを使うか・いま何が動いているか」を 1 か所で決め、`GET /v1/status` の `current` として返します。拡張はそれを表示するだけで、ID から表示名を組み立てません。`current.translate` は選択中（`selected.id` / `label` / `quant` / `short_label`）、稼働中（`loaded`）、状態（`ready` / `starting` / `stopped` / `not_downloaded`）、解決済み Backend、コンテキスト、GPU 層数、並列数を持ち、Backend の解決失敗は例外にせず `backend_error` になります。`current.asr` は選択中、Runtime（`speech.cpp` または `whisper.cpp`）、字幕経路（`speech-serve` または `segment-worker`）、稼働中、状態、Device、`restart_required` を持ちます。表示名と 4 文字以内の短い名前はプリセットが持ち、任意 GGUF の表示名は登録時の別名、短い名前は `GGUF` です。画面の言葉は、選択中を「使用中」、Runtime に読み込まれているモデルを「稼働中」、提案を「推奨」とし、状態は「稼働中」「起動中」「待機中（初回利用時に起動）」「未ダウンロード」「次の字幕開始時に切り替え」を使います。
+
+設定画面の先頭には、翻訳と字幕の使用中モデルを分けて出します。推奨モデルがダウンロード済みで使用中と違うときだけ「推奨に切り替え」が出て、未ダウンロードなら一覧の推奨行から取得する案内になります。モデル一覧は「翻訳」「音声認識」「発話区間検出」に分かれ、使用中の行は「使う」を出さず、未ダウンロードの行の「使う」は押せません。発話区間検出（`silero-vad`）には「使う」を出しません。「使う」「ダウンロード」「同意して記録する」が失敗するとその行にエラーが出て、押している間は「切り替え中…」などが出ます。字幕セクションのエンジン選択と whisper モデル選択は外し、使用中の音声認識モデルは読み取り専用で、切り替えはモデル一覧の「使う」で行います。
+
+ツールバーのツールチップは「ローカル翻訳 — <表示名>（<状態>）」で、バッジは短い名前です。未接続ではバッジを消し、ツールチップは「ローカル翻訳 — 未接続」になります。選択範囲ポップアップの見出しは、翻訳完了時に「選択範囲 · <短い名前>」になり、キャッシュから返すときもキャッシュキーに含まれる選択中モデルの短い名前を使います。字幕開始時は数秒だけ「音声認識 <名前> → 翻訳 <名前>」を出します。
+
 ### 翻訳モデル
 
-翻訳モデルは `llama.cpp`（ピンは `b12211`）の `llama-server` を子プロセス起動します。Windows の llama.cpp CUDA 版は別資産の cudart も取得します。設定 `gpu_backend=cuda` は「NVIDIA GPU を使う」であり、翻訳は CUDA、speech.cpp は同じ GPU を Vulkan で使います。PLaMo は公式の PFML3 を Completions API に渡し、任意の GGUF は汎用の翻訳指示を使います。
+翻訳モデルは `llama.cpp`（ピンは `b12211`）の `llama-server` を子プロセス起動します。Windows の llama.cpp CUDA 版は別資産の cudart も取得します。設定 `gpu_backend=cuda` は「NVIDIA GPU を使う」であり、翻訳は CUDA、speech.cpp は同じ GPU を Vulkan で使います。PLaMo は公式の PFML3 を Completions API に渡し、任意の GGUF は汎用の翻訳指示を使います。設定ファイルがない、または `active_translate_model` が保存されていないときだけ、GPU の推奨モデルを翻訳の既定にします。保存済みの選択は変えません。翻訳の SSE `done` と非ストリーム応答には、使ったモデルの `model_id` に加えて `model_label` と `model_short` が入ります。
 
 アイドル 10 分で `llama-server` を止めます。既定の翻訳先は日本語で、文体は `polite` と `plain` です。用語集とサイト別設定はグローバル設定に含まれます。daemon は起動時に保存済みの `parallel` 設定を翻訳セマフォへ反映します。
 
@@ -30,9 +36,13 @@ Hugging Face からの GGUF ダウンロードは、公開 LFS ポインター�
 
 ### 音声認識モデル
 
-ASR の既定は `speech.cpp` `0.10.1` の `haas-ja-v1.0` です。字幕の本番経路は `speech serve` に `haas-ja-v1.0` と `silero-vad` を載せて Realtime の `server_vad` を使います。`segment-worker` 経路も実装してあります。
+ASR の既定は `speech.cpp` `0.10.1` の `Haas-ja-v1.0`（カタログ名 `haas-ja-v1.0`）です。`Haas-ja-v1.0` などの `speech.cpp` を選んだときの字幕の本番経路は、`speech serve` に音声認識モデルと `silero-vad` を載せて Realtime の `server_vad` を使います。`segment-worker` 経路も実装してあります。
 
-多言語の音声認識は `whisper.cpp` `b5454` の `ggml-large-v3-turbo` と `ggml-base` で、代替は `speech.cpp` の `qwen3-asr-0.6b` です。
+多言語の音声認識は `whisper.cpp` `b5454` の `ggml-large-v3-turbo` と `ggml-base` で、代替は `speech.cpp` の `qwen3-asr-0.6b` です。ASR が `whisper.cpp` のとき、字幕は `subtitle_backend` の値に関係なく `segment-worker` 経路で動きます（`speech serve` は whisper を扱えません）。Windows + NVIDIA 機で `whisper-large-v3-turbo` の字幕（`segment-worker` 経路 + 8B 翻訳）を測ったところ、確定字幕まで mean 3.27 秒（p50 2.985 秒、p95 5.097 秒）かかったため、whisper を選んだときの字幕は `segment-worker` 経路のままにし、実用速度が要る日本語字幕は `Haas-ja` を選びます。
+
+音声認識の選択は `active_asr_model` 1 つです。`asr_engine` は選択中モデルの Runtime とカタログ名から導出します。`asr_engine` と `whisper_model` の POST は互換のため受け、`active_asr_model` に読み替えます。既存設定の移行では、`asr_engine` が `whisper` なら `whisper_model`（whisper のプリセットでなければ `whisper-base`）、`qwen3-asr` なら `qwen3-asr-0.6b`、`haas` で `active_asr_model` が `speech.cpp` の音声認識プリセットならそのまま、それ以外は `Haas-ja-v1.0` にします。
+
+ASR の「使う」は、ダウンロード済みでなければ翻訳と同じ `model_not_downloaded`（409）で拒否します。種類が音声認識でないモデルの activate も拒否します。カタログが変わったら、次の字幕開始時に `speech serve` を起動し直します。字幕セッションがないときに選択を変えたら古い serve を止めます。別の字幕セッション中は止めず、`restart_required` になります。
 
 字幕翻訳は直前の確定セグメント（最大 2 件）を文脈としてプロンプトへ渡します。字幕開始時に字幕スタイル（位置・文字サイズ・文字色・原文表示）がオーバーレイへ渡り、設定を変更すると表示中のオーバーレイへ即時反映されます。
 
@@ -128,6 +138,7 @@ daemon アイドル時の常駐メモリを実測しました。`GET /v1/status`
 - 16GB の段の代替は Q2_K に変えました。Q3_K_M が VRAM に収まらず遅く、Q2_K は製品の起動条件で収まったためです。訳の差（2文目が「変更されました」）は残ります。
 - Haas-ja を speech.cpp 0.10.1 の Windows Vulkan 版で、NVIDIA GPU 上で実行しました。FLEURS ja_jp test から asr-ja-bench v1.1 の修正を当てた 30 本。CER 0.0921（`cer.py`。公表の jacer 6.12% とは直接比べられません）。字幕の確定までは、VAD の `audio_end_ms` の音声を送り終えた時刻から、8B の翻訳を含む確定字幕までで、30 本すべて翻訳あり、mean 0.875、p50 0.783、p95 0.989 秒（1本目は 4.377 秒で speech.cpp と llama-server の起動を含む。1本目を除く平均は 0.754 秒）。記録は `reports/speech-cpp-haas-vulkan-win.json` です。
 - whisper large-v3-turbo の CUDA 版、言語 ja を明示、同じ 30 本で CER 0.0874。修正前の whisper-cli では auto のままでは英語として認識されましたが、製品経路は空でない言語に `-l` を渡すようにしました。修正後に製品の `/api/transcribe`（言語 auto）で同じ素材から 3 本を試し、いずれも日本語で、ラテン文字は 0 でした。この 3 本では CER は測っていません。記録は `reports/whisper-cuda-win.json` です。
+- whisper-large-v3-turbo、CUDA、字幕は `segment-worker` 経路、翻訳は 8B Q4_K_M（CUDA、常駐）、素材は FLEURS ja_jp test の asr-ja-bench v1.1 修正済み 30 本: 確定字幕までのレイテンシは 26 本で mean 3.27 秒、p50 2.985 秒、p95 5.097 秒でした。4 本は EnergyVad（閾値 450）が発話を開かず字幕が出ませんでした。比較の Haas-ja（`speech-serve` + silero VAD + 同じ 8B 翻訳）は 30 本すべて確定し、mean 0.875 秒、p50 0.783 秒、p95 0.989 秒でした。この遅延を見たうえで、whisper を選んだときの字幕は `segment-worker` 経路のままにする、と決めました。実用速度が要る日本語字幕は Haas-ja を選びます。記録は `reports/whisper-subtitles-win.json` です。認識全文は入れていません。
 - daemon アイドル時の `rss_mb` は 45。コンソール窓は、修正前は venv の python ランチャーを `DETACHED_PROCESS` で起動すると窓が出ましたが、修正後はこの機の単体テストで daemon とフラグなしの子の `GetConsoleWindow` が 0 でした。daemon を強制終了すると `llama-server.exe` と `speech.exe` は消え、GPU メモリは 786 MiB まで戻りました（rss 45 と GPU メモリ 786 MiB の数字は再計測していません）。記録は `reports/companion-memory-win.json` です。
 
 ### 未実施の項目
