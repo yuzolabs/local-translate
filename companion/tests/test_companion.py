@@ -917,6 +917,14 @@ async def test_verify_references_summarizes_cer_without_transcripts(tmp_path: Pa
     assert summary["cer"]["measured"] == 0.0
 
 
+def test_subtitle_final_latency_uses_silence_close_or_audio_end():
+    from local_translate.asr_verify import subtitle_final_latency_sec
+
+    assert subtitle_final_latency_sec(10.0, 12.0, [(12.4, 11000)]) == pytest.approx(0.4)
+    assert subtitle_final_latency_sec(10.0, 20.0, [(15.0, 4000)]) == pytest.approx(1.0)
+    assert subtitle_final_latency_sec(10.0, 20.0, []) is None
+
+
 def test_codepoint_patch_and_asr_summary_omit_transcripts():
     from local_translate.asr.transcript_patch import apply_codepoint_patch
     from local_translate.asr_verify import summarize_asr_report
