@@ -63,7 +63,8 @@ async def measure_one(session: aiohttp.ClientSession, url: str, token: str, pcm:
                     break
                 continue
             payload = json.loads(message.data)
-            if payload.get("final"):
+            # 途中の無音で出る確定は、発話を送り終える前に届く。終端は送信完了のあと。
+            if payload.get("final") and speech_end:
                 final = payload
                 finished = time.perf_counter()
                 break
