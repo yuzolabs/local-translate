@@ -65,14 +65,18 @@ def validate_translate_request(payload: dict) -> TranslateRequest:
 
 
 class TranslateService:
-    def __init__(self, llama, paths: AppPaths, settings) -> None:
+    def __init__(self, llama, paths: AppPaths, settings, parallel: int = 1) -> None:
         self.llama = llama
         self.paths = paths
         self.settings = settings
-        self._slots = asyncio_semaphore(1)
+        self._slots = asyncio_semaphore(max(1, int(parallel)))
+
+    @property
+    def parallel_slots(self) -> int:
+        return self._slots._value
 
     def set_parallel(self, parallel: int) -> None:
-        self._slots = asyncio_semaphore(max(1, parallel))
+        self._slots = asyncio_semaphore(max(1, int(parallel)))
 
     async def stream(self, request: TranslateRequest) -> AsyncIterator[str]:
         started = time.perf_counter()

@@ -21,6 +21,9 @@ let nativePort: chrome.runtime.Port | null = null;
 let connectionError = "";
 let connecting: Promise<void> | null = null;
 let uiState: UiState = { connected: false, events: [] };
+let eventsSocket: WebSocket | null = null;
+let eventsReconnect: ReturnType<typeof setTimeout> | null = null;
+let lastProgressRefreshAt = 0;
 const queue = new TranslationQueue(1);
 const cache = new LruTranslationCache(400, chromeStorage());
 const ports = new Set<chrome.runtime.Port>();
@@ -181,6 +184,12 @@ async function updateSettings(patch: Partial<Settings>): Promise<Settings> {
   const settings = await daemon.postJson<Settings>("/v1/settings", patch);
   await chrome.storage.local.set({ settings });
   queue.setConcurrency(settings.parallel ?? 1);
+  if (patch.subtitle_style) {
+    const tabId = await subtitleTargetTabId();
+    if (tabId) {
+      await chrome.tabs.sendMessage(tabId, { type: "subtitle-style", style: settings.subtitle_style }).catch(() => undefined);
+    }
+  }
   await refreshUiState();
   return settings;
 }
@@ -189,6 +198,7 @@ async function loadSettings(): Promise<Settings> {
   try {
     const settings = await (await client()).getJson<Settings>("/v1/settings");
     await chrome.storage.local.set({ settings });
+    queue.setConcurrency(settings.parallel ?? 1);
     return settings;
   } catch (error) {
     const stored = await chrome.storage.local.get("settings");
@@ -253,6 +263,7 @@ async function refreshUiState(): Promise<void> {
       events: uiState.events,
     };
     await chrome.storage.local.set({ settings });
+    ensureEventsSocket();
   } catch (error) {
     uiState = {
       connected: false,
@@ -261,9 +272,59 @@ async function refreshUiState(): Promise<void> {
       settings: uiState.settings,
     };
   }
+  pushUiState();
+}
+
+function pushUiState(): void {
   for (const port of ports) {
     if (port.name === "ui") port.postMessage({ type: "state", state: uiState });
   }
+}
+
+function ensureEventsSocket(): void {
+  if (!endpoint) return;
+  if (eventsSocket && (eventsSocket.readyState === WebSocket.OPEN || eventsSocket.readyState === WebSocket.CONNECTING)) {
+    return;
+  }
+  eventsSocket = null;
+  const socket = new WebSocket(`ws://127.0.0.1:${endpoint.port}/api/events`);
+  eventsSocket = socket;
+  socket.addEventListener("open", () => {
+    if (endpoint) socket.send(JSON.stringify({ type: "auth", token: endpoint.token }));
+  });
+  socket.addEventListener("message", (event) => {
+    if (typeof event.data !== "string") return;
+    try {
+      recordEvent(JSON.parse(event.data) as UiState["events"][number]);
+    } catch {
+      return;
+    }
+  });
+  socket.addEventListener("close", () => {
+    if (eventsSocket === socket) eventsSocket = null;
+    if (eventsReconnect) clearTimeout(eventsReconnect);
+    eventsReconnect = setTimeout(() => ensureEventsSocket(), 2000);
+  });
+}
+
+function recordEvent(event: UiState["events"][number]): void {
+  uiState.events = [...uiState.events, event].slice(-20);
+  const kind = String(event.type ?? "");
+  if (kind === "model.download.progress") {
+    const now = Date.now();
+    if (now - lastProgressRefreshAt < 900) {
+      pushUiState();
+      return;
+    }
+    lastProgressRefreshAt = now;
+    void refreshUiState();
+    return;
+  }
+  if (kind.startsWith("model.download") || kind.startsWith("llama.") || kind.startsWith("asr.")) {
+    void refreshUiState();
+    return;
+  }
+  pushUiState();
 }
 
 async function startSubtitles(senderTabId?: number): Promise<{ ok: true }> {
@@ -282,22 +343,37 @@ async function startSubtitles(senderTabId?: number): Promise<{ ok: true }> {
     tabId: tab.id,
   });
   void daemon;
-  await chrome.tabs.sendMessage(tab.id, { type: "subtitle-session", active: true });
+  const settings = await loadSettings();
+  await chrome.tabs.sendMessage(tab.id, { type: "subtitle-session", active: true, style: settings.subtitle_style });
   return { ok: true };
 }
 
 async function stopSubtitles(): Promise<{ ok: true }> {
   await chrome.runtime.sendMessage({ type: "offscreen:stop" }).catch(() => undefined);
-  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  if (tab?.id) await chrome.tabs.sendMessage(tab.id, { type: "subtitle-session", active: false }).catch(() => undefined);
+  const tabId = await subtitleTargetTabId();
+  if (tabId) await chrome.tabs.sendMessage(tabId, { type: "subtitle-session", active: false }).catch(() => undefined);
   return { ok: true };
 }
 
 async function forwardCaption(caption: Caption): Promise<void> {
-  const stored = await chrome.storage.session.get("subtitleTabId");
-  const tabId = stored.subtitleTabId as number | undefined;
+  const tabId = await subtitleSessionTabId();
   if (!tabId) return;
   await chrome.tabs.sendMessage(tabId, { type: "caption", caption });
+}
+
+async function subtitleSessionTabId(): Promise<number | undefined> {
+  const stored = await chrome.storage.session.get("subtitleTabId");
+  return stored.subtitleTabId as number | undefined;
+}
+
+// 字幕スタイルの変更や停止はオプションページから来るため、アクティブタブ宛てだと
+// 字幕セッション中の動画タブに届かない。offscreen が session に記録した字幕タブを優先し、
+// 記録が無いときだけ現行のアクティブタブに落とす。
+async function subtitleTargetTabId(): Promise<number | undefined> {
+  const tabId = await subtitleSessionTabId();
+  if (tabId) return tabId;
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  return tab?.id;
 }
 
 async function ensureOffscreen(): Promise<void> {

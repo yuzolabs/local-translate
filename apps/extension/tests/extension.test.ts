@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { TRANSLATION_LANGUAGES } from "../lib/languages";
 import { extractPageBlocks } from "../lib/page-blocks";
 import { parseSseChunk } from "../lib/sse-parser";
+import { applySubtitleStyle, renderCaption, setSubtitleSession } from "../lib/subtitle-overlay";
 import { effectiveSettings, hostShouldAutoTranslate, shouldStartAutoTranslate, siteRuleForHost } from "../lib/site-settings";
 import { LruTranslationCache, translationCacheKey, type CacheStorage } from "../lib/translation-cache";
 import { TranslationQueue } from "../lib/translation-queue";
@@ -155,5 +156,29 @@ describe("sse parser", () => {
     expect(parsed.events).toHaveLength(1);
     expect(parsed.events[0]?.event).toBe("delta");
     expect(parsed.rest).toContain("event: done");
+  });
+});
+
+describe("subtitle overlay", () => {
+  it("paints captions with the applied style and the original-text toggle", () => {
+    document.body.innerHTML = "";
+    setSubtitleSession(true);
+    applySubtitleStyle({
+      font_size_px: 24,
+      text_color: "#123456",
+      background: "#000000",
+      position: "top",
+      show_original: false,
+    });
+    renderCaption({ seq: 1, start_ms: 0, end_ms: null, text: "hello", translation: "こんにちは", final: true });
+    const host = document.documentElement.querySelector("[data-lt-root]") as HTMLElement | null;
+    expect(host).not.toBeNull();
+    const html = host!.shadowRoot!.innerHTML;
+    expect(html).toContain("24px");
+    expect(html).toContain("#123456");
+    expect(html).toContain("top: 8%");
+    expect(html).toContain("こんにちは");
+    expect(html).not.toContain('class="orig"');
+    setSubtitleSession(false);
   });
 });

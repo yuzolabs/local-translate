@@ -1,0 +1,8 @@
+{
+  "metric": "daemon 常駐メモリ (GET /v1/status の rss_mb)",
+  "rss_mb": 38,
+  "condition": "daemon アイドル時。llama-server と speech.cpp は未起動、モデル未ロード",
+  "version": "0.1.0",
+  "device": "CPU 4 コア / Intel 内蔵 GPU (Vulkan 検出) / RAM 7.5GB の開発機",
+  "measured_at": "2026-11-09"
+}

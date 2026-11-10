@@ -100,7 +100,7 @@ export interface UiState {
   models?: ModelRow[];
   settings?: Settings;
   about?: AboutInfo;
-  events: Array<{ type: string; message?: string; model_id?: string }>;
+  events: Array<{ type: string; message?: string; model_id?: string; progress?: number; at?: number }>;
 }
 
 export const TRANSLATION_PRIORITY = {

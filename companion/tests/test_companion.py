@@ -118,6 +118,14 @@ def test_state_paths_do_not_hardcode_a_user():
     assert windows == Path("C:/AppData") / "local-translate-extension" / "data"
 
 
+def test_boot_applies_the_stored_parallel_to_the_translator(tmp_path: Path):
+    paths = AppPaths.create(tmp_path / "state", tmp_path / "data")
+    paths.ensure()
+    paths.settings_path.write_text(json.dumps({"parallel": 3}), encoding="utf-8")
+    state = AppState(paths)
+    assert state.translator.parallel_slots == 3
+
+
 def test_vram_tiers():
     big = suggest_runtime(GpuInfo("cuda", "RTX", 24576, 20000, False, 32000, True, True))
     assert big.model_id == "plamo-3-translate-31b-GGUF-Q4_K_M"
@@ -185,12 +193,14 @@ def test_character_error_rate():
 @pytest.mark.asyncio
 async def test_segment_manager_retranscribes_then_finalizes():
     calls = {"n": 0}
+    histories: list[list[dict[str, str]]] = []
 
     async def transcribe(pcm: bytes) -> str:
         calls["n"] += 1
         return f"文{calls['n']}"
 
-    async def translate(text: str) -> str:
+    async def translate(text: str, history: list[dict[str, str]] | None = None) -> str:
+        histories.append(list(history or []))
         return f"訳:{text}"
 
     vad = EnergyVad(sample_rate=16000, threshold=100, min_speech_ms=200, min_silence_ms=400)
@@ -204,7 +214,16 @@ async def test_segment_manager_retranscribes_then_finalizes():
     final = await manager.push_pcm(silence)
     assert final[-1].final is True
     assert final[-1].translation == "訳:文3"
+    assert histories[-1] == []
     assert pcm16_rms(silence) == 0
+
+    # The next final segment carries the previous one as translation context.
+    await manager.push_pcm(speech)
+    await manager.push_pcm(speech)
+    second = await manager.push_pcm(silence)
+    assert second[-1].final is True
+    assert second[-1].translation == "訳:文6"
+    assert histories[-1] == [{"source": "文3", "translation": "訳:文3"}]
 
 
 @pytest.mark.asyncio
@@ -225,6 +244,7 @@ async def test_http_translate_requires_token_and_streams(tmp_path: Path):
         assert status.status == 200
         body = await status.json()
         assert body["version"]
+        assert isinstance(body["rss_mb"], int) and body["rss_mb"] > 0
         origin = f"chrome-extension://{next(iter(state.allowed_extension_ids))}"
         cors = await client.get("/v1/about", headers={**headers, "Origin": origin})
         assert cors.headers["Access-Control-Allow-Origin"] == origin
@@ -366,13 +386,14 @@ async def test_model_download_hashes_off_the_event_loop(tmp_path, monkeypatch):
     model = tmp_path / "model.gguf"
     model.write_bytes(b"gguf")
 
-    def fake_huggingface(repo, filename):
-        del repo, filename
+    def fake_huggingface(repo, filename, revision):
+        del repo, filename, revision
         return model
 
     state.downloader._huggingface = fake_huggingface
     loop_thread = threading.get_ident()
     real_sha256_file = model_download_module.sha256_file
+    state.downloader._fetch_metadata = lambda repo, filename: (real_sha256_file(model), "c" * 40)
     hash_threads = []
 
     def spy(path):
@@ -416,7 +437,7 @@ def test_huggingface_worker_never_touches_the_registry(tmp_path: Path, monkeypat
 
     monkeypatch.setitem(sys.modules, "huggingface_hub", types.SimpleNamespace(hf_hub_download=fake_hf_hub_download))
     downloader = ModelDownloader(registry, EventBus(), models_dir, lambda: None)
-    assert downloader._huggingface("dummy/repo", "model.gguf") == target
+    assert downloader._huggingface("dummy/repo", "model.gguf", "d" * 40) == target
 
 
 def test_registry_save_survives_concurrent_writers(tmp_path: Path):
@@ -687,3 +708,138 @@ async def test_whisper_work_files_are_removed_even_when_transcription_fails(tmp_
     with pytest.raises(CompanionError):
         await broken.transcribe_pcm(b"\x00\x00" * 16)
     assert not wav.exists() and not json_path.exists()
+
+
+@pytest.mark.asyncio
+async def test_download_verifies_the_published_huggingface_hash(tmp_path: Path):
+    import hashlib
+
+    from local_translate.event_bus import EventBus
+    from local_translate.model_download import ModelDownloader
+    from local_translate.model_registry import ModelRegistry
+
+    registry = ModelRegistry(tmp_path / "models.json", tmp_path / "models")
+    events = EventBus()
+    downloader = ModelDownloader(registry, events, tmp_path / "models", lambda: None)
+    payload = b"gguf-bytes"
+
+    def fake_huggingface(repo: str, filename: str, revision: str | None) -> Path:
+        target = tmp_path / "models" / repo.replace("/", "__") / filename
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(payload)
+        return target
+
+    downloader._huggingface = fake_huggingface
+    registry.record_consent("plamo-3-translate-0.8b-GGUF", "plamo-community")
+    good = hashlib.sha256(payload).hexdigest()
+    downloader._fetch_metadata = lambda repo, filename: (good, "c" * 40)
+    await downloader.download("plamo-3-translate-0.8b-GGUF")
+    assert registry.download_status("plamo-3-translate-0.8b-GGUF")["status"] == "ready"
+    assert [event["type"] for event in events.recent if event["type"].startswith("model.download")] == [
+        "model.download.started",
+        "model.download.done",
+    ]
+
+    downloader._fetch_metadata = lambda repo, filename: ("0" * 64, "b" * 40)
+    bad_model = tmp_path / "models" / "pfnet__plamo-3-translate-8b-GGUF" / "plamo-3-translate-8b-Q4_K_M.gguf"
+    registry.record_consent("plamo-3-translate-8b-GGUF", "plamo-community")
+    with pytest.raises(Exception, match="SHA-256"):
+        await downloader.download("plamo-3-translate-8b-GGUF")
+    # 照合落ちの実体は消す。残っていると候補パスや ready 表示が無検証のまま採用してしまう。
+    assert not bad_model.exists()
+    assert registry.resolve_model_path("plamo-3-translate-8b-GGUF") is None
+    assert registry.download_status("plamo-3-translate-8b-GGUF")["status"] == "error"
+    row = next(item for item in registry.list_models(None, None, None) if item["id"] == "plamo-3-translate-8b-GGUF")
+    assert row["status"] != "ready"
+
+
+def test_resolve_model_path_ignores_unrecorded_candidate_files(tmp_path: Path):
+    from local_translate.model_registry import ModelRegistry
+
+    registry = ModelRegistry(tmp_path / "models.json", tmp_path / "models")
+    # ダウンロード先の候補パスに実在ファイルを置いても、検証済みレコードが無い限り採用しない。
+    candidate = tmp_path / "models" / "pfnet__plamo-3-translate-0.8b-GGUF" / "plamo-3-translate-0.8b-Q4_K_M.gguf"
+    candidate.parent.mkdir(parents=True)
+    candidate.write_bytes(b"gguf")
+    assert registry.resolve_model_path("plamo-3-translate-0.8b-GGUF") is None
+    row = next(item for item in registry.list_models(None, None, None) if item["id"] == "plamo-3-translate-0.8b-GGUF")
+    assert row["status"] != "ready"
+    # whisper.cpp の候補パス(ggml-base.bin)もレコードなしでは ready にならない。
+    (tmp_path / "models" / "ggml-base.bin").write_bytes(b"ggml")
+    row = next(item for item in registry.list_models(None, None, None) if item["id"] == "whisper-base")
+    assert row["status"] != "ready"
+    # ダウンロードボタン経由でレコードを作れば解決し、ready になる。
+    registry.mark_file("plamo-3-translate-0.8b-GGUF", candidate, "0" * 64)
+    assert registry.resolve_model_path("plamo-3-translate-0.8b-GGUF") == candidate
+    row = next(item for item in registry.list_models(None, None, None) if item["id"] == "plamo-3-translate-0.8b-GGUF")
+    assert row["status"] == "ready"
+
+
+@pytest.mark.asyncio
+async def test_metadata_and_download_pin_the_same_revision(tmp_path: Path, monkeypatch):
+    import hashlib
+    import sys
+    import types
+
+    from local_translate.event_bus import EventBus
+    from local_translate.model_download import ModelDownloader
+    from local_translate.model_registry import ModelRegistry
+
+    commit = "a" * 40
+    payload = b"gguf-bytes"
+    model_file = tmp_path / "models" / "pfnet__plamo-3-translate-0.8b-GGUF" / "plamo-3-translate-0.8b-Q4_K_M.gguf"
+    download_kwargs: dict = {}
+
+    def fake_hf_hub_download(**kwargs):
+        download_kwargs.update(kwargs)
+        model_file.parent.mkdir(parents=True, exist_ok=True)
+        model_file.write_bytes(payload)
+        return str(model_file)
+
+    class FakeApi:
+        def model_info(self, repo_id: str, files_metadata: bool, timeout: float) -> object:
+            del repo_id, files_metadata, timeout
+            sibling = types.SimpleNamespace(rfilename=model_file.name, lfs={"sha256": hashlib.sha256(payload).hexdigest()})
+            return types.SimpleNamespace(sha=commit, siblings=[sibling])
+
+    fake_hub = types.SimpleNamespace(
+        HfApi=FakeApi,
+        hf_hub_download=fake_hf_hub_download,
+        utils=types.SimpleNamespace(HfHubHTTPError=type("HfHubHTTPError", (Exception,), {})),
+    )
+    monkeypatch.setitem(sys.modules, "huggingface_hub", fake_hub)
+    monkeypatch.setitem(sys.modules, "huggingface_hub.utils", fake_hub.utils)
+    registry = ModelRegistry(tmp_path / "models.json", tmp_path / "models")
+    downloader = ModelDownloader(registry, EventBus(), tmp_path / "models", lambda: None)
+    model_id = "plamo-3-translate-0.8b-GGUF"
+    registry.record_consent(model_id, "plamo-community")
+    await downloader.download(model_id)
+    # メタ取得の model_info と本体の hf_hub_download が同一 revision を見ることを主張する。
+    assert download_kwargs["revision"] == commit
+    assert registry.download_status(model_id)["status"] == "ready"
+
+
+def test_model_info_retries_once_with_a_timeout_on_transient_errors():
+    import types
+
+    from local_translate import model_download as model_download_module
+
+    class FlakyApi:
+        def __init__(self) -> None:
+            self.calls: list[dict] = []
+
+        def model_info(self, **kwargs):
+            self.calls.append(kwargs)
+            if len(self.calls) == 1:
+                raise TimeoutError("一時的なタイムアウト")
+            sibling = types.SimpleNamespace(rfilename="model.gguf", lfs={"sha256": "0" * 64})
+            return types.SimpleNamespace(sha="a" * 40, siblings=[sibling])
+
+    api = FlakyApi()
+    info = model_download_module._model_info_with_retry(api, "pfnet/plamo-3-translate-0.8b-GGUF")
+    assert info.sha == "a" * 40
+    # タイムアウトが渡り、一時失敗の 1 回目のあとに 2 回目で成功する。合計 2 試行。
+    assert api.calls == [
+        {"repo_id": "pfnet/plamo-3-translate-0.8b-GGUF", "files_metadata": True, "timeout": 10.0},
+        {"repo_id": "pfnet/plamo-3-translate-0.8b-GGUF", "files_metadata": True, "timeout": 10.0},
+    ]

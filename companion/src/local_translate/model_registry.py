@@ -118,14 +118,15 @@ class ModelRegistry:
         return None
 
     def resolve_model_path(self, model_id: str) -> Path | None:
+        """Resolve only through the files record, i.e. a verified download that still exists.
+
+        models/<repo>/<filename> の実在だけで黙示採用する旧 candidate フォールバックは
+        照合に失敗したファイルや手動配置の無検証ファイルで llama-server を上げてしまうので
+        廃止。手動配置ファイルはダウンロードボタンで検証・レコード化してから使う。
+        """
         record = self.file_record(model_id)
         if record:
             return Path(record["path"])
-        preset = get_preset(model_id)
-        if preset and preset.runtime == "llama.cpp":
-            candidate = self.models_dir / preset.repo.replace("/", "__") / preset.filename
-            if candidate.is_file():
-                return candidate
         return None
 
     def list_models(self, active_translate: str | None, active_asr: str | None, running_id: str | None) -> list[dict[str, Any]]:
@@ -191,14 +192,12 @@ class ModelRegistry:
         }
 
     def _preset_ready(self, preset: ModelPreset) -> bool:
-        if preset.runtime == "llama.cpp":
-            return self.resolve_model_path(preset.model_id) is not None
-        if preset.runtime == "whisper.cpp":
-            return self.file_record(preset.model_id) is not None or (
-                self.models_dir / preset.filename
-            ).is_file()
-        speech_marker = self.data["files"].get(preset.model_id)
-        return bool(speech_marker)
+        # レコード(検証済みで実在するファイル)だけを ready とする。レコード不在の
+        # 実在ファイルを黙示採用すると照合ゲートが意味を失うため、ここでも見ない。
+        if preset.runtime == "speech.cpp":
+            speech_marker = self.data["files"].get(preset.model_id)
+            return bool(speech_marker)
+        return self.file_record(preset.model_id) is not None
 
 
 def sha256_file(path: Path) -> str:

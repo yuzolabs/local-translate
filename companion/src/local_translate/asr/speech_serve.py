@@ -15,7 +15,7 @@ from local_translate.asr.pcm import resample_pcm16
 from local_translate.errors import CompanionError
 from local_translate.event_bus import EventBus
 
-Translator = Callable[[str], Awaitable[str]]
+Translator = Callable[[str, list[dict[str, str]]], Awaitable[str]]
 
 
 class SpeechServeProcess:
@@ -110,6 +110,7 @@ class RealtimeSubtitleBridge:
         self._interim = ""
         self._item_id: str | None = None
         self._start_ms = 0
+        self._history: list[dict[str, str]] = []
 
     async def run(self, pcm_queue: asyncio.Queue[bytes | None], caption_callback) -> None:
         url = f"http://127.0.0.1:{self.port}/v1/realtime"
@@ -173,7 +174,7 @@ class RealtimeSubtitleBridge:
             self._seq += 1
             translation = None
             if self.translate_interim and self.translator:
-                translation = await self.translator(self._interim)
+                translation = await self.translator(self._interim, self._history[-2:])
             return {
                 "seq": self._seq,
                 "start_ms": self._start_ms,
@@ -185,8 +186,11 @@ class RealtimeSubtitleBridge:
         if event_type == "conversation.item.input_audio_transcription.completed":
             text = str(payload.get("transcript") or self._interim).strip()
             self._seq += 1
-            translation = await self.translator(text) if self.translator and text else None
+            translation = await self.translator(text, self._history[-2:]) if self.translator and text else None
             self._interim = ""
+            if text:
+                self._history.append({"source": text, "translation": translation or ""})
+                del self._history[:-4]
             return {
                 "seq": self._seq,
                 "start_ms": self._start_ms,

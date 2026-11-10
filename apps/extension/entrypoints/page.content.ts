@@ -1,8 +1,9 @@
 import { translateFocusedInput, watchInputs } from "../lib/input-assist";
 import { injectPageStyles, startPageTranslation } from "../lib/page-translator";
 import { closeSelectionPopup, selectionAnchor, showSelectionPopup } from "../lib/selection-popup";
-import { renderCaption, setSubtitleSession } from "../lib/subtitle-overlay";
+import { applySubtitleStyle, renderCaption, setSubtitleSession } from "../lib/subtitle-overlay";
 import { shouldStartAutoTranslate } from "../lib/site-settings";
+import type { SubtitleStyle } from "../lib/types";
 
 export default defineContentScript({
   matches: ["<all_urls>"],
@@ -41,7 +42,8 @@ export default defineContentScript({
         if (text) showSelectionPopup(text, anchor?.x ?? 24, anchor?.y ?? 24);
       }
       if (message.type === "translate-input") translateFocusedInput();
-      if (message.type === "subtitle-session") setSubtitleSession(Boolean(message.active));
+      if (message.type === "subtitle-session") setSubtitleSession(Boolean(message.active), message.style as SubtitleStyle | undefined);
+      if (message.type === "subtitle-style") applySubtitleStyle(message.style as SubtitleStyle);
       if (message.type === "caption") renderCaption(message.caption);
     });
     void chrome.runtime.sendMessage({ type: "should-auto-translate", host: location.host }).then((auto) => {

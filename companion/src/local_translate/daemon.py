@@ -24,6 +24,7 @@ from local_translate.paths import AppPaths, default_app_paths
 from local_translate.process_lock import ProcessLock
 from local_translate.runtime_fetch import RuntimeInstaller
 from local_translate.settings_store import SettingsStore
+from local_translate.vram_presets import suggest_runtime
 from local_translate.speech_runtime import SpeechRuntime
 from local_translate.token_store import load_or_create_token
 from local_translate.translate_service import TranslateService
@@ -45,7 +46,8 @@ class AppState:
         self.llama.log_path = paths.daemon_log_path
         self.speech = SpeechRuntime(self.installer, self.models, self.settings, self.events, self.gpu)
         self.speech.log_path = paths.daemon_log_path
-        self.translator = TranslateService(self.llama, paths, self.settings)
+        parallel = int(self.settings.data.get("parallel") or suggest_runtime(self.gpu).parallel)
+        self.translator = TranslateService(self.llama, paths, self.settings, parallel=parallel)
         self.downloader = ModelDownloader(self.models, self.events, paths.models_dir, self.speech.ensure_speech_binary)
         self.started_at = time.time()
         self.stop_event = asyncio.Event()
