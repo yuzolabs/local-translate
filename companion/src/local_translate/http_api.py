@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import secrets
 import time
 from typing import Any
@@ -32,7 +33,11 @@ from local_translate.vram_presets import suggest_runtime
 
 
 def resident_memory_mb() -> int | None:
-    """Current daemon RSS in MB. /proc on Linux, ru_maxrss as the fallback."""
+    """Current daemon RSS in MB. /proc on Linux, the working set on Windows."""
+    if os.name == "nt":
+        from local_translate.windows_memory import windows_resident_memory_mb
+
+        return windows_resident_memory_mb()
     try:
         with open("/proc/self/status", encoding="utf-8") as handle:
             for line in handle:

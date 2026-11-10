@@ -674,6 +674,18 @@ def test_unpinned_runtime_records_the_first_download_and_rechecks_reinstalls(tmp
     assert excinfo.value.code == "checksum_mismatch"
 
 
+def test_windows_reports_available_ram_and_resident_memory():
+    if sys.platform != "win32":
+        pytest.skip("Windows のメモリ取得です")
+    from local_translate.gpu_detect import available_ram_mb
+    from local_translate.http_api import resident_memory_mb
+
+    ram = available_ram_mb()
+    rss = resident_memory_mb()
+    assert isinstance(ram, int) and ram > 0
+    assert isinstance(rss, int) and rss > 0
+
+
 def test_data_dir_is_private_after_ensure(tmp_path: Path):
     if sys.platform == "win32":
         pytest.skip("POSIX パーミッションの検証です")

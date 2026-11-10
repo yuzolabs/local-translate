@@ -34,6 +34,10 @@ class GpuInfo:
 
 
 def available_ram_mb() -> int | None:
+    if os.name == "nt":
+        from local_translate.windows_memory import windows_available_ram_mb
+
+        return windows_available_ram_mb()
     try:
         page = os.sysconf("SC_PAGE_SIZE")
         pages = os.sysconf("SC_AVPHYS_PAGES")
