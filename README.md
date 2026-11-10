@@ -123,12 +123,12 @@ daemon アイドル時の常駐メモリを実測しました。`GET /v1/status`
 
 - 0.8B Q4_K_M、CUDA、コンテキスト 512: モデル起動を含む壁時計 11.69 秒。起動後の `"Hello."` は「こんにちは。」で 0.228 秒。ページ文と入力文も CPU 実測と同じ訳。記録は `reports/translation-cuda-win.json` です。
 - 8B Q4_K_M、CUDA、コンテキスト 8192: 読み込み 3.997 秒、VRAM 使用 6469 MiB。同じ3文。
-- 31B Q3_K_M、コンテキスト 2048: 読み込み 9.062 秒、VRAM 使用 15953 MiB、空き 109 MiB。同じ3文は 8B と一致。
-- 31B Q2_K、コンテキスト 4096: 読み込み 8.012 秒、VRAM 使用 13892 MiB、空き 2170 MiB。2文目は「変更されました」になり、8B の「延期されました」と違います。
-- 16GB の段の代替は Q3_K_M のままです。遅すぎず訳が揃ったためです。ただし空きが 109 MiB しかないので字幕と同時には使えません。
-- Haas-ja を speech.cpp 0.10.1 の Windows Vulkan 版で、NVIDIA GPU 上で実行しました。FLEURS ja_jp test から asr-ja-bench v1.1 の修正を当てた 30 本。CER 0.0921（`cer.py`。公表の jacer 6.12% とは直接比べられません）。字幕の確定まで平均 0.879 秒（末尾 0.8 秒の無音を含む。30 本すべて翻訳あり）。記録は `reports/speech-cpp-haas-vulkan-win.json` です。
-- whisper large-v3-turbo の CUDA 版、言語 ja を明示、同じ 30 本で CER 0.0874。auto のままでは英語として認識されました。記録は `reports/whisper-cuda-win.json` です。
-- daemon アイドル時の `rss_mb` は 45。コンソール窓は出ません。daemon を強制終了すると `llama-server.exe` と `speech.exe` は消え、GPU メモリは 786 MiB まで戻りました。記録は `reports/companion-memory-win.json` です。
+- 31B Q3_K_M、コンテキスト 2048、n_gpu_layers 99: 読み込み 9.062 秒、VRAM 使用 15953 MiB、空き 109 MiB。llama.cpp の警告「failed to fit params to free device memory」が出て、生成速度は約 11〜13 tok/s（ログの eval は 11.33、12.71、12.16、10.74）。同じ3文は 8B と一致。
+- 31B Q2_K、コンテキスト 4096、parallel 1: 読み込み 8.012 秒、VRAM 使用 13892 MiB、空き 2170 MiB。2文目は「変更されました」になり、8B の「延期されました」と違います。製品が代替を選んだときの ctx 8192・parallel 2・ngl 99 では fit 警告がなく、読み込み 7.195 秒、VRAM 使用 14775 MiB、空き 1287 MiB、短い生成で 40.34 tok/s、スロットは 2 で各コンテキスト 4096 でした。
+- 16GB の段の代替は Q2_K に変えました。Q3_K_M が VRAM に収まらず遅く、Q2_K は製品の起動条件で収まったためです。訳の差（2文目が「変更されました」）は残ります。
+- Haas-ja を speech.cpp 0.10.1 の Windows Vulkan 版で、NVIDIA GPU 上で実行しました。FLEURS ja_jp test から asr-ja-bench v1.1 の修正を当てた 30 本。CER 0.0921（`cer.py`。公表の jacer 6.12% とは直接比べられません）。字幕の確定までは、VAD の `audio_end_ms` の音声を送り終えた時刻から、8B の翻訳を含む確定字幕までで、30 本すべて翻訳あり、mean 0.875、p50 0.783、p95 0.989 秒（1本目は 4.377 秒で speech.cpp と llama-server の起動を含む。1本目を除く平均は 0.754 秒）。記録は `reports/speech-cpp-haas-vulkan-win.json` です。
+- whisper large-v3-turbo の CUDA 版、言語 ja を明示、同じ 30 本で CER 0.0874。修正前の whisper-cli では auto のままでは英語として認識されましたが、製品経路は空でない言語に `-l` を渡すようにしました。修正後に製品の `/api/transcribe`（言語 auto）で同じ素材から 3 本を試し、いずれも日本語で、ラテン文字は 0 でした。この 3 本では CER は測っていません。記録は `reports/whisper-cuda-win.json` です。
+- daemon アイドル時の `rss_mb` は 45。コンソール窓は、修正前は venv の python ランチャーを `DETACHED_PROCESS` で起動すると窓が出ましたが、修正後はこの機の単体テストで daemon とフラグなしの子の `GetConsoleWindow` が 0 でした。daemon を強制終了すると `llama-server.exe` と `speech.exe` は消え、GPU メモリは 786 MiB まで戻りました（rss 45 と GPU メモリ 786 MiB の数字は再計測していません）。記録は `reports/companion-memory-win.json` です。
 
 ### 未実施の項目
 
@@ -136,3 +136,4 @@ daemon アイドル時の常駐メモリを実測しました。`GET /v1/status`
 - Web Store 提出。
 - Linux での GPU 実測は未実施。
 - Haas-ja の CER を公表値と直接比べる正規化は未実施。
+- 内蔵 GPU と NVIDIA が両方見える環境で speech.cpp がどの Vulkan デバイスを選ぶかは未検証。この機の Vulkan デバイスは NVIDIA 1 基だけ。
