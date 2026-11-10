@@ -379,3 +379,50 @@ describe("settings app current models header", () => {
     expect(document.querySelector("header.signal")!.textContent).toContain("未接続");
   });
 });
+
+describe("settings app subtitle section", () => {
+  it("shows the active asr model read-only without engine selects", async () => {
+    mock.handlers.set(
+      "get-state",
+      () =>
+        uiState({
+          models: [modelRow({}), modelRow({ id: "Haas-ja-v1.0", kind: "asr", display_name: "Haas-ja v1.0", active: true })],
+          status: {
+            version: "0",
+            gpu: { backend: "cpu", name: "CPU", vram_total_mb: null, experimental_igpu: false, available_ram_mb: 8000 },
+            suggestion: { model_id: "plamo-3-translate-0.8b-GGUF", reason: "r", alternatives: [], context_size: 2048, n_gpu_layers: 0 },
+            llama: { state: "stopped", model_id: null, port: null },
+            current: {
+              translate: {
+                selected: { id: "plamo-3-translate-0.8b-GGUF", label: "PLaMo 3 Translate 0.8B", quant: "Q4_K_M", short_label: "0.8B" },
+                loaded: null,
+                state: "stopped",
+                backend: "cpu",
+                backend_error: null,
+                context_size: 2048,
+                n_gpu_layers: 0,
+                parallel: 1,
+              },
+              asr: {
+                selected: { id: "Haas-ja-v1.0", label: "Haas-ja v1.0", quant: "Q8_0", short_label: "Haas" },
+                runtime: "speech.cpp",
+                subtitle_pipeline: "speech-serve",
+                loaded: null,
+                state: "stopped",
+                device: "cpu",
+                restart_required: false,
+              },
+            },
+            active_sessions: { subtitles: 0 },
+          },
+        }),
+    );
+    await renderSettingsApp();
+    // エンジンと whisper モデルの選択はもうない。
+    expect([...document.querySelectorAll("label")].map((label) => textOf(label))).not.toContain("エンジン");
+    expect([...document.querySelectorAll("label")].map((label) => textOf(label))).not.toContain("whisper モデル");
+    const section = [...document.querySelectorAll("section")].find((node) => textOf(node).includes("字幕と音声認識"))!;
+    expect(section.textContent).toContain("音声認識モデル: Haas-ja v1.0");
+    expect(section.textContent).toContain("モデル一覧の「使う」で切り替えます");
+  });
+});

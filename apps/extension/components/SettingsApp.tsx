@@ -197,20 +197,12 @@ export function SettingsApp() {
       {settings && (
         <section>
           <h2>字幕と音声認識</h2>
+          {/* 音声認識の選択はモデル一覧の「使う」に統一し、ここでは読み取り専用。 */}
+          <p class="note">
+            音声認識モデル: {current?.asr.selected.label ?? settings.active_asr_model}
+            {current?.asr.restart_required ? "（次の字幕開始時に切り替え）" : ""} — モデル一覧の「使う」で切り替えます
+          </p>
           <div class="inline">
-            <label>エンジン
-              <select value={settings.asr_engine} onChange={(event) => void save({ asr_engine: (event.target as HTMLSelectElement).value as Settings["asr_engine"] })}>
-                <option value="haas">Haas-ja（日本語）</option>
-                <option value="whisper">whisper.cpp（多言語）</option>
-                <option value="qwen3-asr">Qwen3-ASR（多言語・speech.cpp）</option>
-              </select>
-            </label>
-            <label>whisper モデル
-              <select value={settings.whisper_model} onChange={(event) => void save({ whisper_model: (event.target as HTMLSelectElement).value })}>
-                <option value="whisper-base">base（CPU 疎通）</option>
-                <option value="whisper-large-v3-turbo">large-v3-turbo</option>
-              </select>
-            </label>
             <label>字幕位置
               <select value={settings.subtitle_style.position} onChange={(event) => void save({ subtitle_style: { ...settings.subtitle_style, position: (event.target as HTMLSelectElement).value as "top" | "bottom" } })}>
                 <option value="bottom">下</option>
